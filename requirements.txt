@@ -1,0 +1,9 @@
+requests
+curl_cffi
+bcrypt
+playwright
+numpy
+opencv-python
+pillow
+torch
+transformers
