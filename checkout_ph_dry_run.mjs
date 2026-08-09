@@ -1220,7 +1220,7 @@ async function closeProxyBridge(bridge) {
   await new Promise((resolve) => bridge.server.close(resolve));
 }
 
-export async function runCtfPayCard({ card, emit = () => {}, spawnImpl = spawn, proxyUrl = null } = {}) {
+export async function runCtfPayCard({ card, emit = () => {}, spawnImpl = spawn, proxyUrl = null, registerChildProcess = null } = {}) {
   const input = normalizeDirectCardInput(card);
   if (!isCtfPayCheckoutInput(input.checkoutInput) && !isCtfPayFreshInput(input.checkoutInput)) {
     throw new Error("CTF-pay 需要 Stripe Checkout session: cs_live_... / cs_test_...；当前输入不是 Stripe cs_*");
@@ -1289,9 +1289,18 @@ export async function runCtfPayCard({ card, emit = () => {}, spawnImpl = spawn, 
     }
     const child = spawnImpl(command.command, command.args, {
       cwd: command.cwd,
+      detached: process.platform !== "win32",
       windowsHide: true,
       env: childEnv,
     });
+    if (typeof registerChildProcess === "function") {
+      registerChildProcess(child, {
+        kind: "ctf-pay-card",
+        label: "CTF-pay card.py",
+        checkoutInput: built.checkoutInput,
+        proxy: resolvedProxyUrl || "direct",
+      });
+    }
 
     const finish = async (result) => {
       if (settled) return;
@@ -2087,7 +2096,7 @@ async function autofillChatgptShortlinkCard(cdp, rootSessionId, cardInput, conte
   };
 }
 
-export async function runChatgptShortlinkCard({ card, emit = () => {}, proxyUrl = null } = {}) {
+export async function runChatgptShortlinkCard({ card, emit = () => {}, proxyUrl = null, registerChildProcess = null } = {}) {
   const input = normalizeDirectCardInput(card);
   const clickPaymentButton = card?.clickPaymentButton === true || isTruthy(card?.clickPaymentButton);
   const locatePaymentButton = card?.locatePaymentButton === true || clickPaymentButton || isTruthy(card?.locatePaymentButton);
@@ -2123,9 +2132,18 @@ export async function runChatgptShortlinkCard({ card, emit = () => {}, proxyUrl 
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
       windowsHide: false,
     },
   );
+  if (typeof registerChildProcess === "function") {
+    registerChildProcess(child, {
+      kind: "chatgpt-shortlink-browser",
+      label: "ChatGPT shortlink Chrome",
+      checkoutUrl,
+      proxy: resolvedProxyUrl || "direct",
+    });
+  }
   const captureChromeOutput = (chunk) => {
     const text = String(chunk ?? "").trim();
     if (!text) return;
@@ -2269,21 +2287,109 @@ export async function runDirectCardPayment(options = {}) {
 
 export const runDirectCardTest = runDirectCardPayment;
 
-function startDirectCardTestJob(payload, jobs) {
+function isChildProcessRunning(child) {
+  return Boolean(child?.pid && child.exitCode === null && child.signalCode === null);
+}
+
+function terminateChildProcess(child, signal = "SIGTERM") {
+  if (!isChildProcessRunning(child)) return false;
+  const pid = child.pid;
+  if (process.platform === "win32") {
+    const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    killer.once("error", () => {
+      try {
+        child.kill(signal);
+      } catch {
+      }
+    });
+    return true;
+  }
+
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch {
+    try {
+      child.kill(signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function createProcessLog(maxEvents = 500) {
+  const events = [];
+  const listeners = new Set();
+  return {
+    events,
+    listeners,
+    publish(stage, message, details = {}) {
+      const event = {
+        type: "log",
+        time: new Date().toISOString(),
+        stage: String(stage || "process"),
+        message: redactText(String(message ?? "")),
+        ...details,
+      };
+      events.push(event);
+      if (events.length > maxEvents) events.splice(0, events.length - maxEvents);
+      for (const listener of listeners) listener(event);
+      return event;
+    },
+  };
+}
+
+function startDirectCardTestJob(payload, jobs, { processLog = null } = {}) {
   const job = {
     id: randomUUID(),
     events: [],
     listeners: new Set(),
+    children: new Map(),
     done: false,
     createdAt: Date.now(),
     mode: "direct-card",
+  };
+  const jobLabel = () => `直卡任务#${job.id.slice(0, 8)}`;
+
+  const registerChildProcess = (child, details = {}) => {
+    const record = {
+      id: randomUUID(),
+      child,
+      pid: child?.pid ?? null,
+      details,
+      startedAt: Date.now(),
+      exited: false,
+    };
+    job.children.set(record.id, record);
+    const label = details.label || details.kind || "child process";
+    const message = `${jobLabel()} 已启动 ${label} pid=${record.pid ?? "unknown"}`;
+    processLog?.publish("direct-card", message);
+    child?.once?.("exit", (code, signal) => {
+      record.exited = true;
+      record.exitCode = code;
+      record.signal = signal;
+      job.children.delete(record.id);
+      processLog?.publish("直卡", `${jobLabel()} 已退出 ${label} 退出码=${code ?? "null"} 信号=${signal ?? "null"}`);
+    });
+    return record;
   };
 
   const publish = (event) => {
     job.events.push(event);
     for (const listener of job.listeners) listener(event);
-    if (event.type === "done") job.done = true;
+    if (event.type === "log") {
+      processLog?.publish(`直卡/${event.stage || "log"}`, `${jobLabel()} ${event.message || ""}`);
+    }
+    if (event.type === "done") {
+      job.done = true;
+      processLog?.publish("直卡", `${jobLabel()} 已完成 ${JSON.stringify(event.result ?? {})}`);
+    }
   };
+  job.publish = publish;
 
   jobs.set(job.id, job);
   try {
@@ -2294,6 +2400,7 @@ function startDirectCardTestJob(payload, jobs) {
     card: payload,
     emit: publish,
     proxyUrl: firstString(payload?.directCardProxyUrl, payload?.proxyUrl),
+    registerChildProcess,
   }).catch((error) => {
     const failure = {
       ok: false,
@@ -2324,6 +2431,43 @@ function pruneDirectCardJobs(jobs) {
   }
 }
 
+function stopDirectCardJobs(jobs, { jobId = null, processLog = null } = {}) {
+  const targets = jobId ? [jobs.get(jobId)].filter(Boolean) : [...jobs.values()];
+  let stopped = 0;
+  const stoppedJobs = [];
+  for (const job of targets) {
+    const activeChildren = [...(job.children?.values?.() ?? [])].filter((record) => isChildProcessRunning(record.child));
+    if (activeChildren.length === 0) continue;
+    stoppedJobs.push(job.id);
+    for (const record of activeChildren) {
+      if (terminateChildProcess(record.child)) stopped += 1;
+    }
+    const message = `已请求结束 ${activeChildren.length} 个直卡进程`;
+    job.publish?.({
+      type: "log",
+      time: new Date().toISOString(),
+      stage: "control",
+      message,
+    });
+    processLog?.publish("control", `${job.mode}:${job.id.slice(0, 8)} ${message}`);
+  }
+  return { stopped, jobs: stoppedJobs };
+}
+
+function stopManagedProcesses(records, { processLog = null, stage = "control", label = "process" } = {}) {
+  let stopped = 0;
+  const ids = [];
+  for (const [id, record] of records.entries()) {
+    if (!isChildProcessRunning(record.child)) continue;
+    if (terminateChildProcess(record.child)) {
+      stopped += 1;
+      ids.push(id);
+      processLog?.publish(stage, `已请求结束 ${label} pid=${record.pid ?? "unknown"}`);
+    }
+  }
+  return { stopped, ids };
+}
+
 async function serveCheckoutFrontend({
   checkoutEntry,
   proxySettings = null,
@@ -2334,16 +2478,27 @@ async function serveCheckoutFrontend({
 } = {}) {
   const paymentPages = new Map();
   const directCardJobs = new Map();
+  const paymentBrowsers = new Map();
+  const processLog = createProcessLog();
   const defaultProxySettings = proxySettings ?? resolveUiProxySettings({
     checkoutProxyUrl: checkoutProxyUrl ?? proxyUrl,
     directCardProxyUrl: directCardProxyUrl ?? proxyUrl,
     checkoutProxyEnabled: Boolean(checkoutProxyUrl ?? proxyUrl),
     directCardProxyEnabled: Boolean(directCardProxyUrl ?? proxyUrl),
   });
+  const registerPaymentBrowser = (record) => {
+    paymentBrowsers.set(record.id, record);
+    processLog.publish("浏览器", `付款浏览器已启动 pid=${record.pid ?? "unknown"}`);
+    record.child?.once?.("exit", (code, signal) => {
+      paymentBrowsers.delete(record.id);
+      processLog.publish("浏览器", `付款浏览器已退出 pid=${record.pid ?? "unknown"} 退出码=${code ?? "null"} 信号=${signal ?? "null"}`);
+    });
+  };
   const html = renderCheckoutToolHtml({
     capturedAt: checkoutEntry.startedDateTime,
     proxySettings: defaultProxySettings,
   });
+  processLog.publish("界面", `UI 服务已就绪 http://127.0.0.1:${port}`);
 
   const server = http.createServer(async (request, response) => {
     try {
@@ -2359,15 +2514,60 @@ async function serveCheckoutFrontend({
         return;
       }
 
+      if (request.method === "GET" && url.pathname === "/api/process-log/events") {
+        response.writeHead(200, {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache, no-transform",
+          connection: "keep-alive",
+        });
+        response.write(": connected\n\n");
+        for (const event of processLog.events) writeSseEvent(response, event);
+        let closed = false;
+        const cleanup = () => {
+          if (closed) return;
+          closed = true;
+          processLog.listeners.delete(listener);
+        };
+        const listener = (event) => {
+          if (closed || response.destroyed) return;
+          writeSseEvent(response, event);
+        };
+        processLog.listeners.add(listener);
+        request.on("close", cleanup);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/processes/stop-payment-browsers") {
+        const result = stopManagedProcesses(paymentBrowsers, {
+          processLog,
+          stage: "control",
+          label: "open-payment browser",
+        });
+        sendJson(response, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/direct-card/stop") {
+        const payload = await readJsonRequest(request);
+        const result = stopDirectCardJobs(directCardJobs, {
+          jobId: firstString(payload?.jobId),
+          processLog,
+        });
+        sendJson(response, 200, { ok: true, ...result });
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/api/direct-card/run") {
         const payload = await readJsonRequest(request);
         const requestProxySettings = resolveUiProxySettings(payload, defaultProxySettings);
         const proxyRoute = resolveChainedProxyRoute(requestProxySettings, requestProxySettings.directCardProxyUrl);
+        processLog.publish("直卡", `收到直卡请求 代理链=${formatProxyChain(proxyRoute.proxyChain)}`);
         const job = startDirectCardTestJob({
           ...payload,
           directCardProxyUrl: proxyRoute.proxyUrl,
           proxyChain: proxyRoute.proxyChain,
-        }, directCardJobs);
+        }, directCardJobs, { processLog });
+        processLog.publish("直卡", `直卡任务已创建 id=${job.id.slice(0, 8)} 模式=${job.mode}`);
         sendJson(response, 202, { ok: true, jobId: job.id, mode: job.mode });
         return;
       }
@@ -2418,6 +2618,7 @@ async function serveCheckoutFrontend({
         const billingAddress = normalizeBillingAddress(payload.billingAddress);
         const requestProxySettings = resolveUiProxySettings(payload, defaultProxySettings);
         const proxyRoute = resolveChainedProxyRoute(requestProxySettings, requestProxySettings.checkoutProxyUrl);
+        processLog.publish("提链", `收到 ${url.pathname.slice("/api/".length)} 请求 套餐=${checkoutTemplate.planName} 地区=${checkoutTemplate.paymentCountry}/${checkoutTemplate.paymentCurrency} 代理链=${formatProxyChain(proxyRoute.proxyChain)}`);
         const result = await createCheckoutSession({
           accessToken: payload.accessToken,
           checkoutEntry,
@@ -2428,18 +2629,22 @@ async function serveCheckoutFrontend({
           currency: checkoutTemplate.paymentCurrency,
           billingAddress,
         });
+        processLog.publish("提链", `${url.pathname.slice("/api/".length)} 返回 状态=${result.status} 成功=${result.ok ? "是" : "否"}`);
         const body = buildFrontendCheckoutResponse(result);
 
         if (url.pathname === "/api/open-payment" && result.ok && result.parsed) {
-          if (sessionFile) {
-            const browserCheckoutUrl = pickCheckoutBrowserUrl(result.parsed);
+          const browserCheckoutUrl = pickCheckoutBrowserUrl(result.parsed);
+          if (browserCheckoutUrl) {
+            processLog.publish("浏览器", `准备启动付款浏览器 ${browserCheckoutUrl || ""}`);
             await launchCheckoutBrowser({
               checkoutUrl: browserCheckoutUrl,
               sessionFile,
               billingAddress: result.billingAddress,
+              registerBrowserProcess: registerPaymentBrowser,
             });
             body.browserLaunched = true;
             body.browserCheckoutUrl = browserCheckoutUrl;
+            processLog.publish("浏览器", `付款浏览器已就绪 ${browserCheckoutUrl || ""}`);
           } else {
             const id = randomUUID();
             paymentPages.set(id, {
@@ -2449,6 +2654,7 @@ async function serveCheckoutFrontend({
               createdAt: Date.now(),
             });
             body.paymentUrl = `/pay/${encodeURIComponent(id)}`;
+            processLog.publish("提链", `已创建本地付款页 ${body.paymentUrl}`);
           }
         }
 
@@ -2484,7 +2690,9 @@ async function serveCheckoutFrontend({
 
       sendJson(response, 404, { error: "not found" });
     } catch (error) {
-      sendJson(response, 500, { error: redactText(formatError(error)) });
+      const safeError = redactText(formatError(error));
+      processLog.publish("错误", `错误: ${safeError}`);
+      sendJson(response, 500, { error: safeError });
     } finally {
       prunePaymentPages(paymentPages);
       pruneDirectCardJobs(directCardJobs);
@@ -3075,6 +3283,41 @@ export function renderCheckoutToolHtml({
       color: #b8f5cd;
       background: #0c1511;
     }
+    .process-controls, .process-log-box {
+      margin-top: 18px;
+      padding-top: 18px;
+      border-top: 1px solid #deded9;
+    }
+    .process-actions {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+    .action.danger {
+      background: #b42318;
+    }
+    .process-log {
+      min-height: 280px;
+      max-height: 520px;
+      color: #d7e7ff;
+      background: #0b1020;
+    }
+    .process-log-line {
+      display: block;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .process-log-marker {
+      display: inline-block;
+      width: 12px;
+      font-weight: 900;
+    }
+    .process-log-marker.ok {
+      color: #30d158;
+    }
+    .process-log-marker.error {
+      color: #ff453a;
+    }
     h2 {
       margin: 0 0 12px;
       font-size: 16px;
@@ -3278,6 +3521,17 @@ export function renderCheckoutToolHtml({
         <dt>付款国家</dt><dd id="template-country">PH</dd>
         <dt>付款币种</dt><dd id="template-currency">PHP</dd>
       </dl>
+      <div class="process-controls">
+        <h2>进程管理</h2>
+        <div class="process-actions">
+          <button id="stop-payment-browser" class="action danger" type="button">结束付款页面打开</button>
+          <button id="stop-direct-card" class="action danger" type="button">结束直卡进程</button>
+        </div>
+      </div>
+      <div class="process-log-box">
+        <h2>主流程日志</h2>
+        <pre id="process-log" class="terminal process-log" aria-live="polite">[空闲] 管理日志会显示在这里。</pre>
+      </div>
     </aside>
   </main>
   <script>
@@ -3296,7 +3550,10 @@ export function renderCheckoutToolHtml({
     const openButton = document.querySelector("#open-payment");
     const directCardRunButton = document.querySelector("#run-direct-card");
     const directCardFinalButton = document.querySelector("#run-direct-card-final");
+    const stopPaymentBrowserButton = document.querySelector("#stop-payment-browser");
+    const stopDirectCardButton = document.querySelector("#stop-direct-card");
     const directCardTerminal = document.querySelector("#direct-card-terminal");
+    const processLogNode = document.querySelector("#process-log");
     const directCardCheckoutInput = document.querySelector("#direct-card-checkout");
     const directCardNumberInput = document.querySelector("#direct-card-number");
     const directCardExpMonthInput = document.querySelector("#direct-card-exp-month");
@@ -3320,6 +3577,7 @@ export function renderCheckoutToolHtml({
     ];
     const templateInputs = [planInput, paymentCountryInput, paymentCurrencyInput];
     let directCardEventSource = null;
+    let processLogEventSource = null;
 
     document.querySelector("#proxy").textContent = "本地 Clash " + (meta.localProxyEnabled ? ("127.0.0.1:" + meta.localProxyPort) : "off") + " / 提链 " + (meta.checkoutProxyEnabled ? "on" : "off") + " / 直卡 " + (meta.directCardProxyEnabled ? "on" : "off");
     document.querySelector("#capture").textContent = "模板 " + (meta.capturedAt || "内置");
@@ -3330,6 +3588,7 @@ export function renderCheckoutToolHtml({
     directCardProxyEnabledInput.checked = !!meta.directCardProxyEnabled;
     directCardProxyInput.value = meta.directCardProxy || "";
     populateTemplateInputs();
+    connectProcessLog();
 
     toggleButton.addEventListener("click", () => {
       tokenInput.type = tokenInput.type === "password" ? "text" : "password";
@@ -3340,6 +3599,38 @@ export function renderCheckoutToolHtml({
     openButton.addEventListener("click", () => runCheckout("open-payment"));
     directCardRunButton.addEventListener("click", () => runDirectCardTest());
     directCardFinalButton.addEventListener("click", () => runDirectCardTest({ locatePaymentButton: true, clickPaymentButton: true }));
+    stopPaymentBrowserButton.addEventListener("click", async () => {
+      stopPaymentBrowserButton.disabled = true;
+      try {
+        const result = await stopManagedProcesses("/api/processes/stop-payment-browsers", {}, "结束付款页面");
+        appendProcessLog({
+          time: new Date().toISOString(),
+          stage: "control",
+          message: "已请求结束付款页面",
+          details: result,
+        });
+      } catch (error) {
+        setStatus(error && error.message ? error.message : String(error), true);
+      } finally {
+        stopPaymentBrowserButton.disabled = false;
+      }
+    });
+    stopDirectCardButton.addEventListener("click", async () => {
+      stopDirectCardButton.disabled = true;
+      try {
+        const result = await stopManagedProcesses("/api/direct-card/stop", {}, "结束直卡");
+        appendProcessLog({
+          time: new Date().toISOString(),
+          stage: "control",
+          message: "已请求结束直卡进程",
+          details: result,
+        });
+      } catch (error) {
+        setStatus(error && error.message ? error.message : String(error), true);
+      } finally {
+        stopDirectCardButton.disabled = false;
+      }
+    });
 
     function setBusy(isBusy) {
       createButton.disabled = isBusy;
@@ -3388,12 +3679,6 @@ export function renderCheckoutToolHtml({
       }
 
       let paymentWindow = null;
-      if (mode === "open-payment" && !useSessionLogin) {
-        paymentWindow = window.open("", "_blank");
-        if (paymentWindow) {
-          paymentWindow.document.write("<!doctype html><title>付款</title><body style='font-family:system-ui;padding:24px'>正在创建付款会话...</body>");
-        }
-      }
 
       setBusy(true);
       setStatus(mode === "open-payment" ? "正在打开付款页面..." : "正在生成付款链接...");
@@ -3557,6 +3842,72 @@ export function renderCheckoutToolHtml({
       directCardTerminal.scrollTop = directCardTerminal.scrollHeight;
     }
 
+    function displayProcessStage(stage) {
+      return {
+        ui: "界面",
+        checkout: "提链",
+        browser: "浏览器",
+        "direct-card": "直卡",
+        control: "控制",
+        error: "错误",
+        process: "进程",
+      }[stage] || stage;
+    }
+
+    function appendProcessLog(event) {
+      const stamp = typeof event.time === "string" ? event.time.slice(11, 19) : "--:--:--";
+      const stage = displayProcessStage(event.stage || "process");
+      const suffix = event.details ? " " + JSON.stringify(event.details) : "";
+      const message = event.message || "事件";
+      if (processLogNode.dataset.empty !== "0") {
+        processLogNode.textContent = "";
+        processLogNode.dataset.empty = "0";
+      }
+      const text = "[" + stamp + "] [" + stage + "] " + message + suffix;
+      const isError = /(^|\\b)(error|failed|fail|failure|err|异常|错误|失败|拒绝|timeout|timed out)(\\b|$)/i.test(
+        stage + " " + message + " " + suffix,
+      );
+      const line = document.createElement("span");
+      line.className = "process-log-line";
+      const marker = document.createElement("span");
+      marker.className = "process-log-marker " + (isError ? "error" : "ok");
+      marker.textContent = "●";
+      line.appendChild(marker);
+      line.appendChild(document.createTextNode(" " + text));
+      processLogNode.appendChild(line);
+      processLogNode.appendChild(document.createTextNode("\\n"));
+      processLogNode.scrollTop = processLogNode.scrollHeight;
+    }
+
+    function connectProcessLog() {
+      if (processLogEventSource) {
+        processLogEventSource.close();
+      }
+      processLogEventSource = new EventSource("/api/process-log/events");
+      processLogEventSource.addEventListener("log", (event) => {
+        appendProcessLog(JSON.parse(event.data));
+      });
+      processLogEventSource.onerror = () => {
+        if (!processLogEventSource) return;
+        processLogNode.textContent += "\\n[传输] 主流程日志连接中断。";
+        processLogEventSource.close();
+        processLogEventSource = null;
+      };
+    }
+
+    async function stopManagedProcesses(path, payload = {}, label = "操作") {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || (label + "失败"));
+      }
+      return result;
+    }
+
     function normalizeOutboundProxyTextarea(value, label) {
       const newline = String.fromCharCode(10);
       const carriageReturn = String.fromCharCode(13);
@@ -3627,6 +3978,11 @@ export function renderCheckoutToolHtml({
           throw new Error(payload.error || "CTF-pay 直卡启动失败");
         }
 
+        appendProcessLog({
+          time: new Date().toISOString(),
+          stage: "direct-card",
+          message: "直卡任务已创建 " + payload.jobId + " 模式=" + (payload.mode || "direct-card"),
+        });
         directCardEventSource = new EventSource("/api/direct-card/events/" + encodeURIComponent(payload.jobId));
         directCardEventSource.addEventListener("log", (event) => {
           appendDirectCardLog(JSON.parse(event.data));
@@ -3862,10 +4218,17 @@ export function pickCheckoutBrowserUrl(data) {
   );
 }
 
-async function launchCheckoutBrowser({ checkoutUrl, sessionFile, chromePath, remoteDebuggingPort = 0, billingAddress = {} }) {
+async function launchCheckoutBrowser({
+  checkoutUrl,
+  sessionFile,
+  chromePath,
+  remoteDebuggingPort = 0,
+  billingAddress = {},
+  registerBrowserProcess = null,
+} = {}) {
   if (!checkoutUrl) throw new Error("No checkout URL available for browser launch");
-  const cookies = buildBrowserSessionCookies(sessionFile);
-  if (cookies.length === 0) throw new Error("No browser cookies available for injection");
+  const cookies = sessionFile ? buildBrowserSessionCookies(sessionFile) : [];
+  if (sessionFile && cookies.length === 0) throw new Error("No browser cookies available for injection");
 
   const executable = chromePath || findBrowserExecutable();
   const port = Number.isInteger(remoteDebuggingPort) && remoteDebuggingPort > 0 ? remoteDebuggingPort : 0;
@@ -3885,9 +4248,24 @@ async function launchCheckoutBrowser({ checkoutUrl, sessionFile, chromePath, rem
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
       windowsHide: false,
     },
   );
+  const browserRecord = {
+    id: randomUUID(),
+    kind: "open-payment-browser",
+    label: "Open payment Chrome",
+    child,
+    pid: child.pid,
+    checkoutUrl,
+    userDataDir,
+    startedAt: Date.now(),
+    debugPort: null,
+  };
+  if (typeof registerBrowserProcess === "function") {
+    registerBrowserProcess(browserRecord);
+  }
   const captureChromeOutput = (chunk) => {
     const text = String(chunk ?? "").trim();
     if (!text) return;
@@ -3903,6 +4281,7 @@ async function launchCheckoutBrowser({ checkoutUrl, sessionFile, chromePath, rem
 
   try {
     const debugPort = await waitForChromeDebugPort(port, { userDataDir, child, chromeOutput });
+    browserRecord.debugPort = debugPort;
     const cdp = await connectToChromeDebugPort(debugPort);
     try {
       const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
@@ -3930,7 +4309,7 @@ async function launchCheckoutBrowser({ checkoutUrl, sessionFile, chromePath, rem
       cdp.close();
     }
   } catch (error) {
-    child.kill();
+    terminateChildProcess(child);
     await fs.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
