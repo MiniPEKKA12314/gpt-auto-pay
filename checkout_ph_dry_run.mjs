@@ -5448,7 +5448,9 @@ function sendHttp1Request(socket, target, { method, headers, body }) {
       "",
     ];
     socket.write(headerLines.join("\r\n"));
-    socket.end(bodyBuffer);
+    if (bodyBuffer.length) {
+      socket.write(bodyBuffer);
+    }
   });
 }
 
