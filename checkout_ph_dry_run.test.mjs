@@ -26,6 +26,8 @@ import {
   describeCheckoutFailure,
   describeCheckoutTransportFailure,
   describeChromeLaunchFailure,
+  describeChatgptShortlinkPageLoadFailure,
+  diagnoseChatgptShortlinkPaymentTargets,
   extractLatestCheckoutRequest,
   formatCheckoutLinks,
   getLocalCheckoutUnavailableReason,
@@ -75,6 +77,7 @@ import {
   shouldReexecForEnvProxy,
   shouldUseNodeEnvProxy,
   shouldCheckDns,
+  shouldBridgeBrowserProxy,
   waitForChromeDebugPort,
 } from "./checkout_ph_dry_run.mjs";
 
@@ -219,6 +222,25 @@ test("proxy list parsing accepts HTTPS and SOCKS5 proxies", () => {
       "socks5://user:pass@proxy.example:1080",
       "http://127.0.0.1:7890",
     ],
+  );
+});
+
+test("ChatGPT shortlink browser proxies use a local bridge", () => {
+  assert.equal(shouldBridgeBrowserProxy(), false);
+  assert.equal(
+    shouldBridgeBrowserProxy({
+      proxyUrl: "socks5://user:pass@proxy.example:1080",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldBridgeBrowserProxy({
+      proxyChain: [
+        "http://127.0.0.1:7890",
+        "https://user:pass@proxy.example:8443",
+      ],
+    }),
+    true,
   );
 });
 
@@ -1538,6 +1560,53 @@ test("ChatGPT shortlink browser fill selects Stripe payment iframe targets", () 
       webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/captcha",
     }),
     false,
+  );
+});
+
+test("ChatGPT shortlink payment diagnostic identifies unmounted card fields", () => {
+  const diagnostic = diagnoseChatgptShortlinkPaymentTargets([
+    {
+      type: "page",
+      url: "https://chatgpt.com/checkout/openai_llc/oaics_demo",
+    },
+    {
+      type: "iframe",
+      url: "https://js.stripe.com/v3/elements-inner-accessory-target.html?componentName=payment",
+    },
+    {
+      type: "iframe",
+      url: "https://js.stripe.com/v3/elements-inner-accessory-target.html?componentName=expressCheckout",
+    },
+    {
+      type: "iframe",
+      url: "https://js.stripe.com/v3/hcaptcha-invisible.html",
+    },
+    {
+      type: "iframe",
+      url: "https://js.stripe.com/v3/elements-inner-loader-ui.html",
+    },
+  ], {
+    lastFrame: "https://chatgpt.com/checkout/openai_llc/oaics_demo",
+  });
+
+  assert.equal(diagnostic.status, "card_input_frame_not_mounted");
+  assert.equal(diagnostic.paymentElements, 1);
+  assert.equal(diagnostic.cardInputFrames, 0);
+  assert.equal(diagnostic.expressCheckoutFrames, 1);
+  assert.equal(diagnostic.captchaFrames, 1);
+  assert.equal(diagnostic.loaderFrames, 1);
+  assert.match(diagnostic.message, /卡号\/有效期\/CVC 输入 iframe 尚未挂载/);
+});
+
+test("ChatGPT shortlink fill explains Chrome error pages", () => {
+  const message = describeChatgptShortlinkPageLoadFailure("chrome-error://chromewebdata/", {
+    proxyConfigured: true,
+  });
+  assert.match(message, /checkout 页面加载失败/);
+  assert.match(message, /代理未能正常加载 checkout 页面/);
+  assert.equal(
+    describeChatgptShortlinkPageLoadFailure("https://chatgpt.com/checkout/openai_llc/oaics_demo"),
+    "未能在 ChatGPT checkout 页面中完整写入卡号/有效期/CVC",
   );
 });
 

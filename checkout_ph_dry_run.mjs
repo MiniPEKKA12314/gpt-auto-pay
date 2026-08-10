@@ -1193,9 +1193,9 @@ function emitCtfPayLines({ emit, stage, text, input, buffer = "" }) {
   return remainder;
 }
 
-async function prepareSingleProxyUrl({ proxyUrl = null, proxyChain = [] } = {}) {
+async function prepareSingleProxyUrl({ proxyUrl = null, proxyChain = [], forceBridge = false } = {}) {
   const chain = normalizeProxyChain(Array.isArray(proxyChain) && proxyChain.length ? proxyChain : [proxyUrl]);
-  if (chain.length <= 1) {
+  if (chain.length <= 1 && !forceBridge) {
     return {
       proxyUrl: chain[0] ?? null,
       proxyChain: chain,
@@ -1213,6 +1213,11 @@ async function prepareSingleProxyUrl({ proxyUrl = null, proxyChain = [] } = {}) 
     proxyChain: chain,
     bridge,
   };
+}
+
+export function shouldBridgeBrowserProxy({ proxyUrl = null, proxyChain = [] } = {}) {
+  const chain = normalizeProxyChain(Array.isArray(proxyChain) && proxyChain.length ? proxyChain : [proxyUrl]);
+  return chain.length > 0;
 }
 
 async function closeProxyBridge(bridge) {
@@ -1542,6 +1547,23 @@ export function buildChatgptShortlinkCardAutofillExpression(cardInput) {
 })();`;
 }
 
+export function describeChatgptShortlinkPageLoadFailure(lastFrame, { proxyConfigured = false } = {}) {
+  const href = String(lastFrame ?? "").trim();
+  if (!/^chrome-error:\/\//i.test(href)) {
+    return "未能在 ChatGPT checkout 页面中完整写入卡号/有效期/CVC";
+  }
+
+  const lines = [
+    `ChatGPT checkout 页面加载失败，浏览器进入 ${href}。`,
+  ];
+  if (proxyConfigured) {
+    lines.push("结论：直卡代理未能正常加载 checkout 页面；请检查代理连通性、账号密码和会话有效期。");
+  } else {
+    lines.push("结论：请检查 checkout 链接有效性和 VPS 网络连通性。");
+  }
+  return lines.join("\n");
+}
+
 export function buildChatgptShortlinkPaymentButtonLocatorExpression(options = {}) {
   const autoClick = options?.autoClick === true;
   const keywordsJson = JSON.stringify([
@@ -1740,6 +1762,64 @@ export function isLikelyChatgptCardTarget(target = {}) {
   return /componentName=payment|elements-inner|js\.stripe\.com\/v3|chatgpt\.com\/checkout|\/checkout\//i.test(url);
 }
 
+export function diagnoseChatgptShortlinkPaymentTargets(targets = [], { lastFrame = "" } = {}) {
+  const rows = Array.isArray(targets) ? targets : [];
+  let checkoutPages = 0;
+  let paymentElements = 0;
+  let cardInputFrames = 0;
+  let expressCheckoutFrames = 0;
+  let captchaFrames = 0;
+  let loaderFrames = 0;
+
+  for (const target of rows) {
+    const type = String(target?.type ?? "").toLowerCase();
+    const url = String(target?.url ?? "");
+    if (!url) continue;
+    if (type === "page" && /chatgpt\.com\/checkout|\/checkout\//i.test(url)) checkoutPages += 1;
+    if (/componentName=payment|elements-inner-payment/i.test(url)) paymentElements += 1;
+    if (/elements-inner-(?:card|card-number|card-cvc|card-expiry)|componentName=(?:card|cardNumber|cardExpiry|cardCvc)/i.test(url)) {
+      cardInputFrames += 1;
+    }
+    if (/componentName=expressCheckout|expressCheckout|payment-request-inner|google-pay|applepay/i.test(url)) {
+      expressCheckoutFrames += 1;
+    }
+    if (/hcaptcha|captcha/i.test(url)) captchaFrames += 1;
+    if (/elements-inner-loader-ui|loader-ui/i.test(url)) loaderFrames += 1;
+  }
+
+  const errorPage = /^chrome-error:\/\//i.test(String(lastFrame ?? ""));
+  let status = "payment_targets_unavailable";
+  let conclusion = "未检测到 Stripe Payment Element target；请检查 checkout 页面是否完成加载。";
+  if (errorPage) {
+    status = "checkout_page_load_failed";
+    conclusion = "浏览器未成功加载 checkout 页面。";
+  } else if (cardInputFrames > 0) {
+    status = "card_input_frame_detected";
+    conclusion = "已检测到卡输入 iframe，但自动填卡没有命中字段；需要检查该 iframe 内的字段属性。";
+  } else if (paymentElements > 0) {
+    status = "card_input_frame_not_mounted";
+    conclusion = "Stripe 支付组件已加载，但卡号/有效期/CVC 输入 iframe 尚未挂载；当前不是字段选择器问题。";
+  }
+
+  const message = [
+    `支付页面诊断：checkout 页面=${checkoutPages}，Payment Element=${paymentElements}，卡输入 iframe=${cardInputFrames}，快捷支付=${expressCheckoutFrames}，验证组件=${captchaFrames}，加载组件=${loaderFrames}。`,
+    conclusion,
+    captchaFrames > 0 ? "附注：检测到验证组件；仅凭 iframe 存在无法判断当前是否需要完成页面验证。" : "",
+  ].filter(Boolean).join("\n");
+
+  return {
+    status,
+    checkoutPages,
+    paymentElements,
+    cardInputFrames,
+    expressCheckoutFrames,
+    captchaFrames,
+    loaderFrames,
+    message,
+    conclusion,
+  };
+}
+
 function scoreChatgptCardTarget(target = {}) {
   const url = String(target.url ?? "");
   let score = 0;
@@ -1762,6 +1842,27 @@ function describeChatgptCardTarget(target = {}) {
 async function listChromeDebugTargets(port) {
   const targets = await requestChromeDebugJson(port, "/json/list");
   return Array.isArray(targets) ? targets : [];
+}
+
+async function inspectChatgptShortlinkPaymentState(debugPort, lastFrame) {
+  if (!debugPort) return null;
+  try {
+    const targets = await listChromeDebugTargets(debugPort);
+    return diagnoseChatgptShortlinkPaymentTargets(targets, { lastFrame });
+  } catch (error) {
+    const message = `支付页面诊断读取失败: ${redactText(formatError(error))}`;
+    return {
+      status: "payment_target_scan_failed",
+      checkoutPages: 0,
+      paymentElements: 0,
+      cardInputFrames: 0,
+      expressCheckoutFrames: 0,
+      captchaFrames: 0,
+      loaderFrames: 0,
+      message,
+      conclusion: "无法读取 Chrome target 状态。",
+    };
+  }
 }
 
 async function evaluateChatgptCardTargets(debugPort, expression, emit, filledRoles, foundRoles, logged) {
@@ -2086,13 +2187,28 @@ async function autofillChatgptShortlinkCard(cdp, rootSessionId, cardInput, conte
     }
   }
 
+  const lastFrame = lastResult?.href ?? "";
+  const paymentState = await inspectChatgptShortlinkPaymentState(options.debugPort, lastFrame);
+  if (paymentState) {
+    emit({
+      type: "log",
+      time: new Date().toISOString(),
+      stage: "diagnostic",
+      level: "error",
+      message: paymentState.message,
+    });
+  }
+  const fillError = describeChatgptShortlinkPageLoadFailure(lastFrame, {
+    proxyConfigured: options.proxyConfigured === true,
+  });
   return {
     ok: false,
-    status: "fill_incomplete",
+    status: /^chrome-error:\/\//i.test(lastFrame) ? "page_load_failed" : "fill_incomplete",
     filled: [...filledRoles],
     found: [...foundRoles],
-    lastFrame: lastResult?.href ?? "",
-    error: "未能在 ChatGPT checkout 页面中完整写入卡号/有效期/CVC",
+    lastFrame,
+    paymentState,
+    error: [fillError, paymentState?.conclusion].filter(Boolean).join("\n"),
   };
 }
 
@@ -2103,6 +2219,10 @@ export async function runChatgptShortlinkCard({ card, emit = () => {}, proxyUrl 
   const preparedProxy = await prepareSingleProxyUrl({
     proxyUrl: firstString(proxyUrl, card?.directCardProxyUrl, card?.proxyUrl),
     proxyChain: card?.proxyChain ?? [],
+    forceBridge: shouldBridgeBrowserProxy({
+      proxyUrl: firstString(proxyUrl, card?.directCardProxyUrl, card?.proxyUrl),
+      proxyChain: card?.proxyChain ?? [],
+    }),
   });
   const resolvedProxyUrl = preparedProxy.proxyUrl;
   const checkoutUrl = normalizeChatgptShortlinkCheckoutUrl(input.checkoutInput);
@@ -2236,6 +2356,7 @@ export async function runChatgptShortlinkCard({ card, emit = () => {}, proxyUrl 
       debugPort,
       locatePaymentButton,
       clickPaymentButton,
+      proxyConfigured: preparedProxy.proxyChain.length > 0,
     });
     if (fillResult.ok) {
       emit({
