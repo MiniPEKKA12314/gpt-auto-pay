@@ -13,6 +13,7 @@ import {
   buildChatgptShortlinkCardAutofillExpression,
   buildChatgptShortlinkPaymentButtonLocatorExpression,
   buildBillingAddressAutofillExpression,
+  buildChromeLaunchArgs,
   buildCheckoutLinks,
   buildCheckoutUpdateBody,
   buildCheckoutUpdateHeaders,
@@ -22,6 +23,9 @@ import {
   buildLocalCheckoutPageData,
   CHECKOUT_PLAN_OPTIONS,
   decodeJwtPayload,
+  describeCheckoutFailure,
+  describeCheckoutTransportFailure,
+  describeChromeLaunchFailure,
   extractLatestCheckoutRequest,
   formatCheckoutLinks,
   getLocalCheckoutUnavailableReason,
@@ -168,6 +172,43 @@ test("waitForChromeDebugPort uses DevToolsActivePort when Chrome chooses the por
     await new Promise((resolve) => server.close(resolve));
     await fs.rm(userDataDir, { recursive: true, force: true });
   }
+});
+
+test("buildChromeLaunchArgs adds Linux sandbox flags only on Linux", () => {
+  const linuxArgs = buildChromeLaunchArgs({
+    remoteDebuggingPort: 9222,
+    userDataDir: "/tmp/chrome-profile",
+    platform: "linux",
+  });
+  assert.deepEqual(linuxArgs.slice(0, 3), [
+    "--remote-debugging-port=9222",
+    "--remote-debugging-address=127.0.0.1",
+    "--user-data-dir=/tmp/chrome-profile",
+  ]);
+  assert.equal(linuxArgs.includes("--no-sandbox"), true);
+  assert.equal(linuxArgs.includes("--disable-setuid-sandbox"), true);
+  assert.equal(linuxArgs.includes("--disable-dev-shm-usage"), true);
+  assert.equal(linuxArgs.includes("--disable-gpu"), true);
+
+  const windowsArgs = buildChromeLaunchArgs({
+    remoteDebuggingPort: 9222,
+    userDataDir: "C:\\Temp\\chrome-profile",
+    platform: "win32",
+  });
+  assert.equal(windowsArgs.includes("--no-sandbox"), false);
+  assert.equal(windowsArgs.includes("--disable-setuid-sandbox"), false);
+});
+
+test("describeChromeLaunchFailure explains Linux sandbox failures", () => {
+  const message = describeChromeLaunchFailure("Chrome exited before DevTools became available", {
+    chromeOutput: [
+      "[FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:128] No usable sandbox!",
+    ],
+  });
+
+  assert.match(message, /No usable sandbox/);
+  assert.match(message, /结论：Chrome 在当前 Linux\/VPS 环境没有可用 sandbox/);
+  assert.match(message, /--no-sandbox/);
 });
 
 test("proxy list parsing accepts HTTPS and SOCKS5 proxies", () => {
@@ -465,6 +506,58 @@ test("embedded checkout entry contains the captured request template", () => {
   assert.equal(headerNames.includes("authorization"), false);
   assert.equal(headerNames.includes("openai-sentinel-token"), true);
   assert.doesNotThrow(() => assertNoPaymentFields(body));
+});
+
+test("checkout failure diagnostics explain expired proxy HTML blocks", () => {
+  const message = describeCheckoutFailure({
+    ok: false,
+    status: 403,
+    failureStage: "checkout/create",
+    parsed: null,
+    text: "<html><body><div class=\"container\"><span class=\"blocked-icon\"></span><p class=\"explanation\">blocked</p></div></body></html>",
+  }, {
+    proxyUrl: "socks5://customer-session:secret@proxy.ipipgo.com:31212",
+  });
+
+  assert.match(message, /checkout\/create 返回 403/);
+  assert.match(message, /HTML 拒绝页/);
+  assert.match(message, /结论：代理过期或代理会话已失效/);
+});
+
+test("checkout failure diagnostics keep business errors as business errors", () => {
+  const message = describeCheckoutFailure({
+    ok: false,
+    status: 400,
+    failureStage: "checkout/create",
+    parsed: {
+      error: {
+        message: "Billing country must match request country.",
+        param: "billing_details[country]",
+      },
+    },
+    text: JSON.stringify({
+      error: {
+        message: "Billing country must match request country.",
+        param: "billing_details[country]",
+      },
+    }),
+  }, {
+    proxyUrl: "socks5://customer-session:secret@proxy.ipipgo.com:31212",
+  });
+
+  assert.match(message, /Billing country must match request country/);
+  assert.match(message, /param=billing_details\[country\]/);
+  assert.doesNotMatch(message, /代理过期/);
+});
+
+test("checkout transport diagnostics explain proxy tunnel failures", () => {
+  const message = describeCheckoutTransportFailure(new Error("Invalid HTTP response from proxy tunnel"), {
+    stage: "checkout/create",
+    proxyUrl: "socks5://customer-session:secret@proxy.ipipgo.com:31212",
+  });
+
+  assert.match(message, /Invalid HTTP response from proxy tunnel/);
+  assert.match(message, /结论：代理过期或代理会话已失效/);
 });
 
 test("checkout template options normalize supported plans, countries, and currencies", () => {
@@ -1211,6 +1304,7 @@ test("renderCheckoutToolHtml builds the token driven frontend", () => {
   assert.match(html, /run-direct-card-final/);
   assert.match(html, /locatePaymentButton/);
   assert.match(html, /\/api\/\" \+ mode/);
+  assert.match(html, /event\.level === "error"/);
 });
 
 test("renderCheckoutToolHtml emits parseable inline browser scripts", () => {
@@ -1272,22 +1366,28 @@ test("direct card helpers build a CTF-pay card config and redact the number", ()
 });
 
 test("CTF-pay command runs card.py without PayPal flags", () => {
+  const scriptPath = process.platform === "win32"
+    ? "D:\\repo\\CTF-pay\\card.py"
+    : "/opt/repo/CTF-pay/card.py";
+  const configPath = process.platform === "win32"
+    ? "D:\\tmp\\ctfpay.json"
+    : "/tmp/ctfpay.json";
   const command = buildCtfPayCommand({
     checkoutInput: "cs_live_abc123",
-    configPath: "D:\\tmp\\ctfpay.json",
-    scriptPath: "D:\\repo\\CTF-pay\\card.py",
+    configPath,
+    scriptPath,
   });
 
   assert.equal(command.command, "py");
   assert.deepEqual(command.args, [
     "-3",
-    "D:\\repo\\CTF-pay\\card.py",
+    scriptPath,
     "cs_live_abc123",
     "--config",
-    "D:\\tmp\\ctfpay.json",
+    configPath,
     "--json-result",
   ]);
-  assert.equal(command.cwd, "D:\\repo\\CTF-pay");
+  assert.equal(command.cwd, path.dirname(scriptPath));
   assert.equal(command.args.includes("--paypal"), false);
 });
 

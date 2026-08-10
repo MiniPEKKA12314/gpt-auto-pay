@@ -2120,16 +2120,11 @@ export async function runChatgptShortlinkCard({ card, emit = () => {}, proxyUrl 
   const chromeOutput = [];
   const child = spawn(
     executable,
-    [
-      `--remote-debugging-port=${port}`,
-      "--remote-debugging-address=127.0.0.1",
-      `--user-data-dir=${userDataDir}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-background-networking",
-      ...(resolvedProxyUrl ? [`--proxy-server=${resolvedProxyUrl}`, "--proxy-bypass-list=<-loopback>"] : []),
-      "about:blank",
-    ],
+    buildChromeLaunchArgs({
+      remoteDebuggingPort: port,
+      userDataDir,
+      extraArgs: resolvedProxyUrl ? [`--proxy-server=${resolvedProxyUrl}`, "--proxy-bypass-list=<-loopback>"] : [],
+    }),
     {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -2333,6 +2328,7 @@ function createProcessLog(maxEvents = 500) {
         time: new Date().toISOString(),
         stage: String(stage || "process"),
         message: redactText(String(message ?? "")),
+        level: String(details.level ?? "info").toLowerCase(),
         ...details,
       };
       events.push(event);
@@ -2373,7 +2369,9 @@ function startDirectCardTestJob(payload, jobs, { processLog = null } = {}) {
       record.exitCode = code;
       record.signal = signal;
       job.children.delete(record.id);
-      processLog?.publish("直卡", `${jobLabel()} 已退出 ${label} 退出码=${code ?? "null"} 信号=${signal ?? "null"}`);
+      processLog?.publish("直卡", `${jobLabel()} 已退出 ${label} 退出码=${code ?? "null"} 信号=${signal ?? "null"}`, {
+        level: code === 0 && !signal ? "info" : "error",
+      });
     });
     return record;
   };
@@ -2382,11 +2380,15 @@ function startDirectCardTestJob(payload, jobs, { processLog = null } = {}) {
     job.events.push(event);
     for (const listener of job.listeners) listener(event);
     if (event.type === "log") {
-      processLog?.publish(`直卡/${event.stage || "log"}`, `${jobLabel()} ${event.message || ""}`);
+      processLog?.publish(`直卡/${event.stage || "log"}`, `${jobLabel()} ${event.message || ""}`, {
+        level: String(event.level ?? (event.stage === "error" ? "error" : "info")).toLowerCase(),
+      });
     }
     if (event.type === "done") {
       job.done = true;
-      processLog?.publish("直卡", `${jobLabel()} 已完成 ${JSON.stringify(event.result ?? {})}`);
+      processLog?.publish("直卡", `${jobLabel()} 已完成 ${JSON.stringify(event.result ?? {})}`, {
+        level: event.result?.ok === false ? "error" : "info",
+      });
     }
   };
   job.publish = publish;
@@ -2411,6 +2413,7 @@ function startDirectCardTestJob(payload, jobs, { processLog = null } = {}) {
       type: "log",
       time: new Date().toISOString(),
       stage: "error",
+      level: "error",
       message: failure.error,
     });
     publish({ type: "done", result: failure });
@@ -2491,7 +2494,9 @@ async function serveCheckoutFrontend({
     processLog.publish("浏览器", `付款浏览器已启动 pid=${record.pid ?? "unknown"}`);
     record.child?.once?.("exit", (code, signal) => {
       paymentBrowsers.delete(record.id);
-      processLog.publish("浏览器", `付款浏览器已退出 pid=${record.pid ?? "unknown"} 退出码=${code ?? "null"} 信号=${signal ?? "null"}`);
+      processLog.publish("浏览器", `付款浏览器已退出 pid=${record.pid ?? "unknown"} 退出码=${code ?? "null"} 信号=${signal ?? "null"}`, {
+        level: code === 0 && !signal ? "info" : "error",
+      });
     });
   };
   const html = renderCheckoutToolHtml({
@@ -2629,7 +2634,9 @@ async function serveCheckoutFrontend({
           currency: checkoutTemplate.paymentCurrency,
           billingAddress,
         });
-        processLog.publish("提链", `${url.pathname.slice("/api/".length)} 返回 状态=${result.status} 成功=${result.ok ? "是" : "否"}`);
+        processLog.publish("提链", `${url.pathname.slice("/api/".length)} 返回 状态=${result.status} 成功=${result.ok ? "是" : "否"}`, {
+          level: result.ok ? "info" : "error",
+        });
         const body = buildFrontendCheckoutResponse(result);
 
         if (url.pathname === "/api/open-payment" && result.ok && result.parsed) {
@@ -2691,7 +2698,7 @@ async function serveCheckoutFrontend({
       sendJson(response, 404, { error: "not found" });
     } catch (error) {
       const safeError = redactText(formatError(error));
-      processLog.publish("错误", `错误: ${safeError}`);
+      processLog.publish("错误", `错误: ${safeError}`, { level: "error" });
       sendJson(response, 500, { error: safeError });
     } finally {
       prunePaymentPages(paymentPages);
@@ -2733,29 +2740,71 @@ function buildFrontendCheckoutResponse(result) {
   };
 
   if (!result.ok) {
-    const checkoutError = result.parsed?.error && typeof result.parsed.error === "object"
-      ? result.parsed.error
-      : result.parsed && typeof result.parsed === "object"
-        ? result.parsed
-        : null;
-    const message = firstString(
-      checkoutError?.message,
-      checkoutError?.detail,
-      checkoutError?.error,
-      checkoutError?.code,
-    );
-    const param = firstString(checkoutError?.param);
-    if (message) {
-      response.error = [
-        result.failureStage ? `${result.failureStage}:` : "",
-        message,
-        param ? `(param=${param})` : "",
-      ].filter(Boolean).join(" ");
-    }
+    response.error = describeCheckoutFailure(result, {
+      proxyUrl: result.proxyUrl,
+      proxyChain: result.proxyChain,
+    });
     response.text = redactText(result.text).slice(0, 1000);
   }
 
   return response;
+}
+
+export function describeCheckoutFailure(result, { proxyUrl = null, proxyChain = [] } = {}) {
+  if (result?.ok) return "";
+  const failureStage = firstString(result?.failureStage, "checkout/create");
+  const checkoutError = result?.parsed?.error && typeof result.parsed.error === "object"
+    ? result.parsed.error
+    : result?.parsed && typeof result.parsed === "object"
+      ? result.parsed
+      : null;
+  const message = firstString(
+    checkoutError?.message,
+    checkoutError?.detail,
+    checkoutError?.error,
+    checkoutError?.code,
+  );
+  const param = firstString(checkoutError?.param);
+  const status = Number.parseInt(result?.status, 10);
+  const rawText = redactText(String(result?.text ?? "")).trim();
+  const htmlLike = /<!doctype\s+html|<html\b|<body\b|blocked-icon|explanation|container/i.test(rawText);
+  const proxyContext = normalizeProxyChain([proxyUrl, ...normalizeProxyChain(proxyChain)]).length > 0;
+  const proxyLikeText = /invalid http response from proxy tunnel|proxy connect failed|socks5 authentication failed|socks5 connect failed|socket ended during proxy handshake|econnreset|econnrefused|etimedout|err_ssl_packet_length_too_long|tls_get_more_records/i.test(rawText);
+  const proxyExpired = proxyContext && ((status === 403 && htmlLike) || proxyLikeText);
+
+  const lines = [];
+  if (message) {
+    lines.push([
+      `${failureStage}:`,
+      redactText(message),
+      param ? `(param=${redactText(param)})` : "",
+    ].filter(Boolean).join(" "));
+  } else if (status && htmlLike) {
+    lines.push(`${failureStage} 返回 ${status}：代理访问被拒绝，返回了 HTML 拒绝页。`);
+  } else if (status) {
+    lines.push(`${failureStage} 返回状态 ${status}`);
+  } else if (rawText) {
+    lines.push(`${failureStage} 失败：${rawText.slice(0, 180)}`);
+  } else {
+    lines.push(`${failureStage} 失败`);
+  }
+
+  if (proxyExpired) {
+    lines.push("结论：代理过期或代理会话已失效。");
+  }
+
+  return lines.join("\n");
+}
+
+export function describeCheckoutTransportFailure(error, { stage = "checkout/create", proxyUrl = null, proxyChain = [] } = {}) {
+  const rawMessage = redactText(formatError(error));
+  const proxyContext = normalizeProxyChain([proxyUrl, ...normalizeProxyChain(proxyChain)]).length > 0;
+  const proxyLike = /invalid http response from proxy tunnel|proxy connect failed|socks5 authentication failed|socks5 connect failed|socket ended during proxy handshake|econnreset|econnrefused|etimedout|err_ssl_packet_length_too_long|tls_get_more_records/i.test(rawMessage);
+  const lines = [`${stage}: ${rawMessage}`];
+  if (proxyContext && proxyLike) {
+    lines.push("结论：代理过期或代理会话已失效。");
+  }
+  return lines.join("\n");
 }
 
 function resolveUiProxyUrl(payload, fieldName, fallbackUrl = null) {
@@ -3864,9 +3913,9 @@ export function renderCheckoutToolHtml({
         processLogNode.dataset.empty = "0";
       }
       const text = "[" + stamp + "] [" + stage + "] " + message + suffix;
-      const isError = /(^|\\b)(error|failed|fail|failure|err|异常|错误|失败|拒绝|timeout|timed out)(\\b|$)/i.test(
-        stage + " " + message + " " + suffix,
-      );
+      const logText = stage + " " + message + " " + suffix;
+      const isError = event.level === "error" ||
+        /error|failed|fail|failure|err|异常|错误|失败|拒绝|timeout|timed out|成功=否|success=false|状态=[45]\d\d|status=[45]\d\d|no usable sandbox|chrome exited before devtools|invalid http response from proxy tunnel|proxy connect failed|socks5 authentication failed|econnreset|err_ssl_packet_length_too_long/i.test(logText);
       const line = document.createElement("span");
       line.className = "process-log-line";
       const marker = document.createElement("span");
@@ -4218,6 +4267,48 @@ export function pickCheckoutBrowserUrl(data) {
   );
 }
 
+function chromeLinuxSandboxFlags(platform = process.platform) {
+  if (platform !== "linux") return [];
+  return [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+  ];
+}
+
+export function buildChromeLaunchArgs({
+  remoteDebuggingPort = 0,
+  userDataDir,
+  extraArgs = [],
+  platform = process.platform,
+} = {}) {
+  if (!userDataDir) throw new Error("Chrome userDataDir is required");
+  return [
+    `--remote-debugging-port=${remoteDebuggingPort}`,
+    "--remote-debugging-address=127.0.0.1",
+    `--user-data-dir=${userDataDir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-background-networking",
+    ...chromeLinuxSandboxFlags(platform),
+    ...extraArgs,
+    "about:blank",
+  ];
+}
+
+export function describeChromeLaunchFailure(message, { chromeOutput = [] } = {}) {
+  const raw = [
+    String(message ?? "").trim(),
+    ...chromeOutput.slice(-3).map((item) => String(item ?? "").trim()).filter(Boolean),
+  ].filter(Boolean).join(" | ");
+  if (raw.includes("结论：")) return redactText(raw);
+  if (/no usable sandbox|zygote_host_impl_linux\.cc|apparmor-userns-restrictions|suid_sandbox_development/i.test(raw)) {
+    return redactText(`${raw}\n结论：Chrome 在当前 Linux/VPS 环境没有可用 sandbox；已自动使用 --no-sandbox、--disable-setuid-sandbox、--disable-dev-shm-usage、--disable-gpu。若仍失败，请检查 Xvfb 和 Chrome 安装。`);
+  }
+  return redactText(raw);
+}
+
 async function launchCheckoutBrowser({
   checkoutUrl,
   sessionFile,
@@ -4237,15 +4328,7 @@ async function launchCheckoutBrowser({
 
   const child = spawn(
     executable,
-    [
-      `--remote-debugging-port=${port}`,
-      "--remote-debugging-address=127.0.0.1",
-      `--user-data-dir=${userDataDir}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-background-networking",
-      "about:blank",
-    ],
+    buildChromeLaunchArgs({ remoteDebuggingPort: port, userDataDir }),
     {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -4311,7 +4394,7 @@ async function launchCheckoutBrowser({
   } catch (error) {
     terminateChildProcess(child);
     await fs.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
-    throw error;
+    throw new Error(describeChromeLaunchFailure(formatError(error), { chromeOutput }));
   }
 
   console.log(`[browser] launched: ${checkoutUrl}`);
@@ -4517,8 +4600,7 @@ export async function waitForChromeDebugPort(port, { userDataDir = null, child =
   let detectedPort = Number.isInteger(port) && port > 0 ? port : null;
   while (Date.now() < deadline) {
     if (child && (child.exitCode !== null || child.signalCode !== null)) {
-      const tail = chromeOutput.length > 0 ? `; chrome output: ${chromeOutput.slice(-3).join(" | ")}` : "";
-      throw new Error(`Chrome exited before DevTools became available${tail}`);
+      throw new Error(describeChromeLaunchFailure("Chrome exited before DevTools became available", { chromeOutput }));
     }
 
     if (userDataDir) {
@@ -4542,7 +4624,10 @@ export async function waitForChromeDebugPort(port, { userDataDir = null, child =
     }
     await delay(150);
   }
-  throw new Error(`Chrome DevTools endpoint did not start on port ${detectedPort ?? port}: ${lastError?.message ?? "timeout"}`);
+  throw new Error(describeChromeLaunchFailure(
+    `Chrome DevTools endpoint did not start on port ${detectedPort ?? port}: ${lastError?.message ?? "timeout"}`,
+    { chromeOutput },
+  ));
 }
 
 async function connectToChromeDebugPort(port) {
@@ -4750,12 +4835,21 @@ export async function createCheckoutSession({
     }),
   );
   const headers = sanitizeHeaders(checkoutEntry.request.headers, accessToken);
-  const response = await postCheckoutRequest(CHECKOUT_ENDPOINT, {
-    headers,
-    body,
-    proxyUrl,
-    proxyChain,
-  });
+  let response;
+  try {
+    response = await postCheckoutRequest(CHECKOUT_ENDPOINT, {
+      headers,
+      body,
+      proxyUrl,
+      proxyChain,
+    });
+  } catch (error) {
+    throw new Error(describeCheckoutTransportFailure(error, {
+      stage: "checkout/create",
+      proxyUrl,
+      proxyChain,
+    }));
+  }
 
   const text = await response.text();
   let parsed = null;
@@ -4772,12 +4866,21 @@ export async function createCheckoutSession({
 
   if (response.ok && parsed && planConfig.update) {
     const updateBodyObject = buildCheckoutUpdateBody(parsed, checkoutTemplate.planName);
-    const updateResponse = await postCheckoutRequest(CHECKOUT_UPDATE_ENDPOINT, {
-      headers: buildCheckoutUpdateHeaders(headers, parsed),
-      body: JSON.stringify(updateBodyObject),
-      proxyUrl,
-      proxyChain,
-    });
+    let updateResponse;
+    try {
+      updateResponse = await postCheckoutRequest(CHECKOUT_UPDATE_ENDPOINT, {
+        headers: buildCheckoutUpdateHeaders(headers, parsed),
+        body: JSON.stringify(updateBodyObject),
+        proxyUrl,
+        proxyChain,
+      });
+    } catch (error) {
+      throw new Error(describeCheckoutTransportFailure(error, {
+        stage: "checkout/update",
+        proxyUrl,
+        proxyChain,
+      }));
+    }
     const updateText = await updateResponse.text();
     let updateParsed = null;
     try {
@@ -4817,6 +4920,8 @@ export async function createCheckoutSession({
     paymentCurrency: checkoutTemplate.paymentCurrency,
     directCardCheckoutInput: finalParsed ? pickDirectCardCheckoutInput(finalParsed) : null,
     checkoutUpdate,
+    proxyUrl,
+    proxyChain,
   };
 }
 
