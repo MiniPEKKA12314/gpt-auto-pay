@@ -1475,6 +1475,23 @@ test("ChatGPT shortlink card autofill expression targets card fields", () => {
   assert.match(expression, /exp-date/);
 });
 
+test("ChatGPT shortlink card autofill orders country before state and supports state aliases", () => {
+  const expression = buildChatgptShortlinkCardAutofillExpression({
+    checkoutInput: "https://chatgpt.com/checkout/openai_llc/oaics_cccc11cf36b34a1eb974555f680218b4",
+    sessionToken: "session-token-value",
+    number: "4242424242424242",
+    expMonth: "12",
+    expYear: "2030",
+    cvc: "123",
+    billingAddress: { country: "US", state: "Alaska" },
+  });
+
+  assert.doesNotThrow(() => new Function(`return ${expression};`));
+  assert.match(expression, /roles = \[.*country.*state/);
+  assert.match(expression, /usStateAliases/);
+  assert.match(expression, /selectMisses/);
+});
+
 test("ChatGPT shortlink payment button locator highlights without submitting", () => {
   const expression = buildChatgptShortlinkPaymentButtonLocatorExpression();
 

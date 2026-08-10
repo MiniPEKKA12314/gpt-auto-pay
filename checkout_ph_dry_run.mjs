@@ -1467,26 +1467,59 @@ export function buildChatgptShortlinkCardAutofillExpression(cardInput) {
     return false;
   }
 
-  function setNativeValue(element, value) {
+  function normalizeChoice(value) {
+    return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  }
+
+  const usStateAliases = (() => {
+    const aliases = {};
+    const entries = "AL:Alabama|AK:Alaska|AZ:Arizona|AR:Arkansas|CA:California|CO:Colorado|CT:Connecticut|DE:Delaware|FL:Florida|GA:Georgia|HI:Hawaii|ID:Idaho|IL:Illinois|IN:Indiana|IA:Iowa|KS:Kansas|KY:Kentucky|LA:Louisiana|ME:Maine|MD:Maryland|MA:Massachusetts|MI:Michigan|MN:Minnesota|MS:Mississippi|MO:Missouri|MT:Montana|NE:Nebraska|NV:Nevada|NH:NewHampshire|NJ:NewJersey|NM:NewMexico|NY:NewYork|NC:NorthCarolina|ND:NorthDakota|OH:Ohio|OK:Oklahoma|OR:Oregon|PA:Pennsylvania|RI:RhodeIsland|SC:SouthCarolina|SD:SouthDakota|TN:Tennessee|TX:Texas|UT:Utah|VT:Vermont|VA:Virginia|WA:Washington|WV:WestVirginia|WI:Wisconsin|WY:Wyoming|DC:DistrictofColumbia";
+    for (const entry of entries.split("|")) {
+      const [code, name] = entry.split(":");
+      aliases[normalizeChoice(code)] = normalizeChoice(name);
+      aliases[normalizeChoice(name)] = normalizeChoice(code);
+    }
+    return aliases;
+  })();
+
+  function selectOptionMatches(option, value, role) {
+    const wanted = normalizeChoice(value);
+    if (!wanted) return false;
+    const wantedTokens = new Set([wanted, wanted.replace(/^(?:us|usa)/, "")]);
+    if (role === "state") {
+      for (const token of [...wantedTokens]) {
+        const alias = usStateAliases[token];
+        if (alias) {
+          wantedTokens.add(alias);
+          wantedTokens.add("us" + alias);
+        }
+      }
+    }
+    const candidates = [
+      option.value,
+      option.textContent,
+      option.label,
+      option.getAttribute("data-value")
+    ].map(normalizeChoice).filter(Boolean);
+    return candidates.some((candidate) => [...wantedTokens].some((token) =>
+      candidate === token ||
+      (token.length > 2 && candidate.includes(token)) ||
+      (candidate.length > 2 && token.includes(candidate))
+    ));
+  }
+
+  function setNativeValue(element, value, role = "") {
     if (!value || !isUsable(element)) return false;
     const tag = element.tagName.toLowerCase();
     element.scrollIntoView({ block: "center", inline: "center" });
     element.focus({ preventScroll: true });
     if (tag === "select") {
-      const wanted = String(value).toLowerCase();
-      for (const option of element.options) {
-        if (
-          String(option.value).toLowerCase() === wanted ||
-          String(option.textContent || "").toLowerCase() === wanted ||
-          String(option.textContent || "").toLowerCase().includes(wanted)
-        ) {
-          element.value = option.value;
-          element.dispatchEvent(new Event("input", { bubbles: true }));
-          element.dispatchEvent(new Event("change", { bubbles: true }));
-          return true;
-        }
-      }
-      return false;
+      const option = [...element.options].find((candidate) => selectOptionMatches(candidate, value, role));
+      if (!option) return false;
+      element.value = option.value;
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
     }
 
     const prototype = tag === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -1512,11 +1545,12 @@ export function buildChatgptShortlinkCardAutofillExpression(cardInput) {
     return true;
     }
 
-    const fields = allFields(document).filter(isUsable);
+    let fields = allFields(document).filter(isUsable);
     const filled = [];
     const found = [];
+    const selectMisses = [];
     const used = new Set();
-    const roles = ["number", "expiry", "expMonth", "expYear", "cvc", "name", "email", "phone", "line1", "line2", "city", "state", "postal_code", "country"];
+    const roles = ["number", "expiry", "expMonth", "expYear", "cvc", "country", "name", "email", "phone", "line1", "line2", "city", "postal_code", "state"];
     for (const role of roles) {
       const value = values[role];
       if (!value) continue;
@@ -1531,9 +1565,14 @@ export function buildChatgptShortlinkCardAutofillExpression(cardInput) {
     const target = candidates[0];
       if (target) {
         found.push(role);
-        if (setNativeValue(target, value)) {
+        if (setNativeValue(target, value, role)) {
         used.add(target);
         filled.push(role);
+        if (role === "country") {
+          fields = allFields(document).filter(isUsable);
+        }
+      } else if (target.tagName.toLowerCase() === "select") {
+        selectMisses.push(role);
       }
     }
   }
@@ -1542,7 +1581,8 @@ export function buildChatgptShortlinkCardAutofillExpression(cardInput) {
     title: document.title,
     fieldCount: fields.length,
     found,
-    filled
+    filled,
+    selectMisses: [...new Set(selectMisses)]
   };
 })();`;
 }
@@ -2105,6 +2145,7 @@ async function autofillChatgptShortlinkCard(cdp, rootSessionId, cardInput, conte
   const expression = buildChatgptShortlinkCardAutofillExpression(cardInput);
   const filledRoles = new Set();
   const foundRoles = new Set();
+  const selectMisses = new Set();
   const logged = new Set();
   let lastResult = null;
   const finishFillResult = async (lastFrame) => {
@@ -2113,6 +2154,7 @@ async function autofillChatgptShortlinkCard(cdp, rootSessionId, cardInput, conte
       status: "filled",
       filled: [...filledRoles],
       found: [...foundRoles],
+      selectMisses: [...selectMisses],
       lastFrame,
     };
     if (options.locatePaymentButton) {
@@ -2144,8 +2186,12 @@ async function autofillChatgptShortlinkCard(cdp, rootSessionId, cardInput, conte
       if (!value || typeof value !== "object") continue;
       lastResult = value;
       for (const role of value.found ?? []) foundRoles.add(role);
+      for (const role of value.selectMisses ?? []) {
+        if (!filledRoles.has(role)) selectMisses.add(role);
+      }
       for (const role of value.filled ?? []) {
         filledRoles.add(role);
+        selectMisses.delete(role);
         const key = `${role}:${context.sessionId}:${context.contextId ?? "default"}`;
         if (!logged.has(key)) {
           logged.add(key);
@@ -2172,6 +2218,9 @@ async function autofillChatgptShortlinkCard(cdp, rootSessionId, cardInput, conte
     );
     if (targetResult) {
       lastResult = targetResult;
+      for (const role of targetResult.selectMisses ?? []) {
+        if (!filledRoles.has(role)) selectMisses.add(role);
+      }
       if (hasCompleteChatgptShortlinkFill(filledRoles, cardInput)) {
         return await finishFillResult(targetResult.href || targetResult.targetUrl || "");
       }
@@ -2206,6 +2255,7 @@ async function autofillChatgptShortlinkCard(cdp, rootSessionId, cardInput, conte
     status: /^chrome-error:\/\//i.test(lastFrame) ? "page_load_failed" : "fill_incomplete",
     filled: [...filledRoles],
     found: [...foundRoles],
+    selectMisses: [...selectMisses],
     lastFrame,
     paymentState,
     error: [fillError, paymentState?.conclusion].filter(Boolean).join("\n"),
