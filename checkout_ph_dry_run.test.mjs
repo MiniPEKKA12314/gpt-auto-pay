@@ -14,6 +14,7 @@ import {
   buildChatgptShortlinkPaymentButtonLocatorExpression,
   buildBillingAddressAutofillExpression,
   buildChromeLaunchArgs,
+  buildChatgptPostClickProbeExpression,
   buildCheckoutLinks,
   buildCheckoutUpdateBody,
   buildCheckoutUpdateHeaders,
@@ -28,6 +29,8 @@ import {
   describeChromeLaunchFailure,
   describeChatgptShortlinkPageLoadFailure,
   diagnoseChatgptShortlinkPaymentTargets,
+  classifyChatgptPostClickState,
+  summarizeChatgptPostClickTargets,
   extractLatestCheckoutRequest,
   formatCheckoutLinks,
   getLocalCheckoutUnavailableReason,
@@ -1492,6 +1495,48 @@ test("ChatGPT shortlink card autofill orders country before state and supports s
   assert.match(expression, /selectMisses/);
 });
 
+test("ChatGPT post-click status diagnostics classify success, decline, captcha, and processing", () => {
+  assert.match(buildChatgptPostClickProbeExpression(), /aria-live/);
+  assert.deepEqual(
+    summarizeChatgptPostClickTargets([
+      { type: "page", url: "https://chatgpt.com/checkout/openai_llc/oaics_demo" },
+      { type: "iframe", url: "https://js.stripe.com/v3/payment.html?componentName=payment" },
+      { type: "iframe", url: "https://newassets.hcaptcha.com/static/challenge.html" },
+      { type: "iframe", url: "https://acs.example.test/3ds/challenge" },
+    ]),
+    {
+      checkoutPages: 1,
+      stripeTargets: 1,
+      captchaTargets: 1,
+      authenticationTargets: 1,
+    },
+  );
+  assert.equal(
+    classifyChatgptPostClickState({
+      samples: [{ href: "https://chatgpt.com/checkout/success", title: "ChatGPT", alerts: ["Payment successful"], buttons: [] }],
+    }).status,
+    "success",
+  );
+  assert.equal(
+    classifyChatgptPostClickState({
+      samples: [{ href: "https://chatgpt.com/checkout/demo", title: "ChatGPT", alerts: ["Your card was declined"], buttons: [] }],
+    }).status,
+    "declined",
+  );
+  assert.equal(
+    classifyChatgptPostClickState({
+      samples: [{ href: "https://chatgpt.com/checkout/demo", title: "ChatGPT", alerts: ["Verify you are human"], buttons: [] }],
+    }).status,
+    "captcha",
+  );
+  assert.equal(
+    classifyChatgptPostClickState({
+      samples: [{ href: "https://chatgpt.com/checkout/demo", title: "ChatGPT", alerts: [], buttons: [{ text: "Subscribe", disabled: true, busy: true }] }],
+    }).status,
+    "processing",
+  );
+});
+
 test("ChatGPT shortlink payment button locator highlights without submitting", () => {
   const expression = buildChatgptShortlinkPaymentButtonLocatorExpression();
 
@@ -1613,6 +1658,24 @@ test("ChatGPT shortlink payment diagnostic identifies unmounted card fields", ()
   assert.equal(diagnostic.captchaFrames, 1);
   assert.equal(diagnostic.loaderFrames, 1);
   assert.match(diagnostic.message, /卡号\/有效期\/CVC 输入 iframe 尚未挂载/);
+});
+
+test("ChatGPT shortlink payment diagnostic explains checkout pages without payment elements", () => {
+  const diagnostic = diagnoseChatgptShortlinkPaymentTargets([
+    {
+      type: "page",
+      url: "https://chatgpt.com/checkout/openai_llc/oaics_demo",
+    },
+  ], {
+    lastFrame: "https://chatgpt.com/checkout/openai_llc/oaics_demo",
+  });
+
+  assert.equal(diagnostic.status, "checkout_page_loaded_without_payment_element");
+  assert.equal(diagnostic.checkoutPages, 1);
+  assert.equal(diagnostic.paymentElements, 0);
+  assert.equal(diagnostic.cardInputFrames, 0);
+  assert.match(diagnostic.message, /checkout 壳已打开，但 Stripe Payment Element 没有挂载/);
+  assert.match(diagnostic.message, /不是字段选择器问题/);
 });
 
 test("ChatGPT shortlink fill explains Chrome error pages", () => {

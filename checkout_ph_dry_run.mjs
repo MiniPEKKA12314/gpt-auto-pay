@@ -1829,20 +1829,32 @@ export function diagnoseChatgptShortlinkPaymentTargets(targets = [], { lastFrame
 
   const errorPage = /^chrome-error:\/\//i.test(String(lastFrame ?? ""));
   let status = "payment_targets_unavailable";
-  let conclusion = "未检测到 Stripe Payment Element target；请检查 checkout 页面是否完成加载。";
+  let conclusion = "当前页面里没有找到 Stripe Payment Element；请检查 checkout 页面是否真的进入可支付分支。";
   if (errorPage) {
     status = "checkout_page_load_failed";
-    conclusion = "浏览器未成功加载 checkout 页面。";
+    conclusion = "浏览器进入了错误页，checkout 页面加载失败。";
   } else if (cardInputFrames > 0) {
     status = "card_input_frame_detected";
     conclusion = "已检测到卡输入 iframe，但自动填卡没有命中字段；需要检查该 iframe 内的字段属性。";
   } else if (paymentElements > 0) {
     status = "card_input_frame_not_mounted";
     conclusion = "Stripe 支付组件已加载，但卡号/有效期/CVC 输入 iframe 尚未挂载；当前不是字段选择器问题。";
+  } else if (checkoutPages > 0) {
+    status = loaderFrames > 0 ? "checkout_page_loading_without_payment_element" : "checkout_page_loaded_without_payment_element";
+    if (captchaFrames > 0) {
+      conclusion = "ChatGPT checkout 壳已打开，但出现验证组件，Stripe Payment Element 还没有挂载；先完成验证或等待页面继续渲染。";
+    } else if (loaderFrames > 0) {
+      conclusion = "ChatGPT checkout 壳已打开，但页面仍在加载，Stripe Payment Element 还没有挂载。";
+    } else {
+      conclusion = "ChatGPT checkout 壳已打开，但 Stripe Payment Element 没有挂载；更像是页面分支、会话状态或风控拦截，不是字段选择器问题。";
+    }
+  } else if (captchaFrames > 0 || loaderFrames > 0 || expressCheckoutFrames > 0) {
+    status = "checkout_subframe_only";
+    conclusion = "当前只看到验证码、加载或快捷支付碎片，没有完整的 checkout / Stripe 支付主体。";
   }
 
   const message = [
-    `支付页面诊断：checkout 页面=${checkoutPages}，Payment Element=${paymentElements}，卡输入 iframe=${cardInputFrames}，快捷支付=${expressCheckoutFrames}，验证组件=${captchaFrames}，加载组件=${loaderFrames}。`,
+    `支付页面诊断（${status}）：checkout 页面=${checkoutPages}，Payment Element=${paymentElements}，卡输入 iframe=${cardInputFrames}，快捷支付=${expressCheckoutFrames}，验证组件=${captchaFrames}，加载组件=${loaderFrames}。`,
     conclusion,
     captchaFrames > 0 ? "附注：检测到验证组件；仅凭 iframe 存在无法判断当前是否需要完成页面验证。" : "",
   ].filter(Boolean).join("\n");
@@ -2005,6 +2017,237 @@ function summarizePaymentButtonLocator(value = {}) {
   return firstString(value.text, value.id, value.className, value.tagName, "payment button");
 }
 
+export function buildChatgptPostClickProbeExpression() {
+  return `(() => {
+  function compact(value) {
+    return String(value ?? "").replace(/\\s+/g, " ").trim().slice(0, 240);
+  }
+
+  function visible(element) {
+    if (!element) return false;
+    const style = getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  const signalNodes = [
+    ...document.querySelectorAll(
+      "[role='alert'], [aria-live], [data-testid*='error'], [data-testid*='status'], " +
+      "[class*='error'], [class*='declin'], [class*='success'], [class*='process'], " +
+      "[class*='verif'], [class*='captcha']"
+    )
+  ];
+  const alerts = [...new Set(
+    signalNodes
+      .filter(visible)
+      .map((element) => compact(element.textContent))
+      .filter(Boolean)
+  )].slice(0, 8);
+
+  const buttons = [...document.querySelectorAll("button, input[type='submit']")]
+    .filter(visible)
+    .map((element) => ({
+      text: compact(element.textContent || element.value),
+      disabled: Boolean(element.disabled),
+      busy: element.getAttribute("aria-busy") === "true",
+    }))
+    .filter((button) => button.text || button.disabled || button.busy)
+    .slice(0, 12);
+
+  return {
+    href: location.href,
+    title: document.title,
+    alerts,
+    buttons,
+  };
+})();`;
+}
+
+export function summarizeChatgptPostClickTargets(targets = []) {
+  const summary = {
+    checkoutPages: 0,
+    stripeTargets: 0,
+    captchaTargets: 0,
+    authenticationTargets: 0,
+  };
+  for (const target of Array.isArray(targets) ? targets : []) {
+    const type = String(target?.type ?? "").toLowerCase();
+    const url = String(target?.url ?? "");
+    if (!url || !["page", "iframe"].includes(type)) continue;
+    if (/chatgpt\.com\/checkout|\/checkout\//i.test(url)) summary.checkoutPages += 1;
+    if (/stripe\.com|stripecdn\.com/i.test(url)) summary.stripeTargets += 1;
+    if (/hcaptcha|captcha/i.test(url)) summary.captchaTargets += 1;
+    if (/3ds|3d-secure|acs\b|authentication/i.test(url) ||
+      (/challenge/i.test(url) && !/hcaptcha|captcha/i.test(url))) {
+      summary.authenticationTargets += 1;
+    }
+  }
+  return summary;
+}
+
+export function classifyChatgptPostClickState({
+  samples = [],
+  targetSummary = {},
+  currentUrl = "",
+} = {}) {
+  const rows = Array.isArray(samples) ? samples : [];
+  const alerts = rows.flatMap((sample) => Array.isArray(sample?.alerts) ? sample.alerts : []);
+  const buttons = rows.flatMap((sample) => Array.isArray(sample?.buttons) ? sample.buttons : []);
+  const text = [
+    ...alerts,
+    ...buttons.map((button) => button.text),
+    ...rows.map((sample) => sample?.title),
+  ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+  const evidence = alerts.find(Boolean) || "";
+  const normalized = text.toLowerCase();
+  const success = /payment (?:successful|succeeded|complete)|payment complete|subscription (?:active|confirmed)|you're subscribed|all set|thank you for subscribing|付款成功|支付成功|订阅成功/.test(normalized);
+  const declined = /card (?:was )?declined|payment (?:failed|declined)|could(?: not|n't) complete|not accepted|insufficient funds|incorrect cvc|expired card|do not honor|payment failed|付款失败|支付失败|银行卡.*拒绝|余额不足/.test(normalized);
+  const captcha = /captcha|verify you are human|human verification|人机验证|验证你是人类/.test(normalized);
+  const authentication = /3d secure|3ds|additional authentication|authenticate|one[- ]time passcode|otp|bank verification|身份验证|银行验证|验证码/.test(normalized) ||
+    Number(targetSummary.authenticationTargets) > 0;
+  const busy = buttons.some((button) => button?.disabled || button?.busy) ||
+    /processing|pending|正在处理|处理中|请稍候|loading/.test(normalized);
+
+  let status = "unknown";
+  let terminal = false;
+  let message = "点击后状态：未确认；未检测到成功、拒绝或明确验证文案。";
+  if (success) {
+    status = "success";
+    terminal = true;
+    message = "点击后状态：成功；页面出现付款或订阅完成信号。";
+  } else if (declined) {
+    status = "declined";
+    terminal = true;
+    message = `点击后状态：被拒绝；${evidence || "页面出现支付失败或银行卡拒绝信号。"}`;
+  } else if (captcha) {
+    status = "captcha";
+    terminal = true;
+    message = `点击后状态：需要人机验证；${evidence || "页面出现验证码或人机验证信号。"}`;
+  } else if (authentication) {
+    status = "authentication_required";
+    terminal = true;
+    message = "点击后状态：需要额外验证，可能是 3DS、银行验证或一次性验证码。";
+  } else if (busy) {
+    status = "processing";
+    message = "点击后状态：处理中；页面仍在等待最终结果。";
+  }
+
+  return {
+    status,
+    terminal,
+    currentUrl: firstString(currentUrl, rows.find((sample) => sample?.href)?.href),
+    title: firstString(rows.find((sample) => sample?.title)?.title),
+    evidence: redactText(evidence).slice(0, 240),
+    targetSummary: {
+      checkoutPages: Number(targetSummary.checkoutPages) || 0,
+      stripeTargets: Number(targetSummary.stripeTargets) || 0,
+      captchaTargets: Number(targetSummary.captchaTargets) || 0,
+      authenticationTargets: Number(targetSummary.authenticationTargets) || 0,
+    },
+    message,
+  };
+}
+
+function isLikelyChatgptPostClickContext(context = {}) {
+  return isLikelyChatgptCardContext(context) ||
+    /https:\/\/(?:newassets\.)?hcaptcha\.com|https:\/\/.*(?:3ds|acs|challenge)/i.test(String(context.origin ?? ""));
+}
+
+async function collectChatgptPostClickState(cdp, rootSessionId, contexts, debugPort) {
+  const expression = buildChatgptPostClickProbeExpression();
+  let targets = [];
+  if (debugPort) {
+    try {
+      targets = await listChromeDebugTargets(debugPort);
+    } catch {
+      targets = [];
+    }
+  }
+
+  const samples = [];
+  const seen = new Set();
+  const candidates = [...contexts.values()]
+    .filter(isLikelyChatgptPostClickContext)
+    .slice(0, 24);
+  if (candidates.length === 0) {
+    candidates.push({
+      sessionId: rootSessionId,
+      contextId: null,
+      origin: "https://chatgpt.com",
+    });
+  }
+
+  for (const context of candidates) {
+    const key = `${context.sessionId}:${context.contextId ?? "default"}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const params = {
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+      };
+      if (context.contextId) params.contextId = context.contextId;
+      const evaluation = await cdp.send("Runtime.evaluate", params, context.sessionId);
+      const value = evaluation?.result?.value;
+      if (value && typeof value === "object") samples.push(value);
+    } catch {
+    }
+  }
+
+  const pageSample = samples.find((sample) => /chatgpt\.com\/checkout|\/checkout\//i.test(String(sample?.href ?? "")));
+  return classifyChatgptPostClickState({
+    samples,
+    targetSummary: summarizeChatgptPostClickTargets(targets),
+    currentUrl: pageSample?.href ?? "",
+  });
+}
+
+async function monitorChatgptPostClickState(cdp, rootSessionId, contexts, emit, options = {}) {
+  const timeoutMs = Number.isFinite(options.postClickTimeoutMs) ? options.postClickTimeoutMs : 15000;
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  emit({
+    type: "log",
+    time: new Date().toISOString(),
+    stage: "payment",
+    message: `付款按钮已点击，开始监控结果（最多 ${Math.ceil(timeoutMs / 1000)} 秒）...`,
+  });
+
+  while (Date.now() < deadline) {
+    latest = await collectChatgptPostClickState(cdp, rootSessionId, contexts, options.debugPort);
+    if (latest.terminal) {
+      emit({
+        type: "log",
+        time: new Date().toISOString(),
+        stage: "payment",
+        level: latest.status === "success" ? "info" : "error",
+        message: latest.message,
+      });
+      return latest;
+    }
+    await delay(800);
+  }
+
+  const result = latest ?? classifyChatgptPostClickState();
+  const timeoutResult = {
+    ...result,
+    timedOut: true,
+    message: result.status === "processing"
+      ? "点击后状态：仍在处理中；监控窗口结束，尚未收到最终结果。"
+      : result.message,
+  };
+  emit({
+    type: "log",
+    time: new Date().toISOString(),
+    stage: "payment",
+    level: "error",
+    message: timeoutResult.message,
+  });
+  return timeoutResult;
+}
+
 async function locateChatgptPaymentButtonTargets(debugPort, expression, emit, logged) {
   if (!debugPort) return null;
 
@@ -2159,6 +2402,15 @@ async function autofillChatgptShortlinkCard(cdp, rootSessionId, cardInput, conte
     };
     if (options.locatePaymentButton) {
       result.paymentButton = await locateChatgptShortlinkPaymentButton(cdp, rootSessionId, contexts, emit, options);
+      if (result.paymentButton?.clicked) {
+        result.postClick = await monitorChatgptPostClickState(
+          cdp,
+          rootSessionId,
+          contexts,
+          emit,
+          options,
+        );
+      }
     }
     return result;
   };
