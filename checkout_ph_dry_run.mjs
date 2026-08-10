@@ -2031,7 +2031,7 @@ export function buildChatgptPostClickProbeExpression() {
     return rect.width > 0 && rect.height > 0;
   }
 
-  const signalPattern = /payment was not approved|payment not approved|not approved|declined|payment failed|could(?: not|n't) complete|not accepted|insufficient funds|incorrect cvc|expired card|do not honor|3d secure|3ds|authenticate|one[- ]time passcode|otp|verification code|bank verification|bank app|captcha|human verification|verify you are human|付款失败|支付失败|银行卡拒绝|余额不足|人机验证|身份验证|银行验证|验证码|处理中|正在处理/i;
+  const signalPattern = /payment was not approved|payment not approved|not approved|declined|payment failed|could(?: not|n't) complete|not accepted|insufficient funds|incorrect cvc|expired card|do not honor|3d secure|3ds|authenticate|one[- ]time passcode|otp|verification code|bank verification|bank app|captcha|human verification|verify you are human|payment successful|subscription active|you're subscribed|you are subscribed|subscription confirmed|订阅成功|已订阅|订阅已生效|订阅已激活|欢迎使用|付款成功|支付成功|付款已完成|付款已确认|plus is active|chatgpt plus is active|已激活|checkout complete|completed|处理完成|success/i;
   function signalText(element) {
     const ownText = compact([...element.childNodes]
       .filter((node) => node.nodeType === Node.TEXT_NODE)
@@ -2185,6 +2185,26 @@ function pickKnownPostClickSignals(sources = [], phrases = [], maxItems = 12) {
   return result;
 }
 
+function isLikelyChatgptPostClickTarget(target = {}) {
+  const type = String(target.type ?? "").toLowerCase();
+  const url = String(target.url ?? "");
+  if (!url || !["page", "iframe"].includes(type)) return false;
+  if (/backend-api\/sentinel\/frame|hcaptcha|captcha/i.test(url)) return false;
+  return /chatgpt\.com|js\.stripe\.com|stripecdn\.com|3ds|3d-secure|acs\b|authentication|challenge/i.test(url);
+}
+
+function scoreChatgptPostClickTarget(target = {}) {
+  const type = String(target.type ?? "").toLowerCase();
+  const url = String(target.url ?? "");
+  let score = 0;
+  if (type === "page") score += 50;
+  if (/chatgpt\.com\/checkout/i.test(url)) score += 100;
+  if (/chatgpt\.com/i.test(url)) score += 80;
+  if (/js\.stripe\.com|stripecdn\.com/i.test(url)) score += 20;
+  if (/3ds|3d-secure|acs\b|authentication|challenge/i.test(url)) score += 10;
+  return score;
+}
+
 function formatPostClickRawDetails(state = {}) {
   const lines = [];
   if (state.rawError) {
@@ -2298,27 +2318,58 @@ export function classifyChatgptPostClickState({
   const captchaSignals = pickKnownPostClickSignals(evidenceSources, captchaPhrases);
   const verificationSignals = pickKnownPostClickSignals(evidenceSources, verificationPhrases);
   const processingSignals = pickKnownPostClickSignals(evidenceSources, processingPhrases);
+  const successPhrases = [
+    "Payment successful",
+    "payment successful",
+    "payment succeeded",
+    "payment complete",
+    "subscription active",
+    "subscription confirmed",
+    "you're subscribed",
+    "you are subscribed",
+    "successfully subscribed",
+    "subscription is active",
+    "welcome to chatgpt plus",
+    "chatgpt plus is active",
+    "plus is active",
+    "已订阅",
+    "你已订阅",
+    "已成功订阅",
+    "订阅成功",
+    "订阅已生效",
+    "订阅已激活",
+    "欢迎使用",
+    "付款成功",
+    "支付成功",
+    "付款已完成",
+    "付款已确认",
+    "处理完成",
+  ];
+  const successSignals = pickKnownPostClickSignals(evidenceSources, successPhrases);
   const rawError = firstString(
     declinedSignals[0],
     captchaSignals[0],
     verificationSignals[0],
     processingSignals[0],
   ) || "";
+  const successEvidence = successSignals[0] || "";
   const normalizedRawSignals = [
+    ...successSignals,
     ...declinedSignals,
     ...captchaSignals,
     ...verificationSignals,
     ...processingSignals,
   ].filter((value, index, array) => array.findIndex((item) => item.toLowerCase() === value.toLowerCase()) === index).slice(0, 12);
   const rawAlerts = pickKnownPostClickSignals(alerts, [
+    ...successPhrases,
     ...declinedPhrases,
     ...captchaPhrases,
     ...verificationPhrases,
     ...processingPhrases,
   ]);
-  const evidence = rawError;
+  const evidence = rawError || successEvidence;
   const normalized = text.toLowerCase();
-  const success = /payment (?:successful|succeeded|complete)|payment complete|subscription (?:active|confirmed)|you're subscribed|all set|thank you for subscribing|付款成功|支付成功|订阅成功/.test(normalized);
+  const success = /payment (?:successful|succeeded|complete)|payment complete|subscription (?:active|confirmed|is active)|you're subscribed|you are subscribed|successfully subscribed|welcome to chatgpt plus|chatgpt plus is active|plus is active|已订阅|你已订阅|已成功订阅|订阅成功|订阅已生效|订阅已激活|欢迎使用|付款成功|支付成功|付款已完成|付款已确认|处理完成/.test(normalized);
   const declined = /payment was not approved|payment not approved|card (?:was )?declined|payment (?:failed|declined)|could(?: not|n't) complete|not accepted|insufficient funds|incorrect cvc|expired card|do not honor|payment failed|付款失败|支付失败|银行卡.*拒绝|余额不足/.test(normalized);
   const captcha = /captcha|verify you are human|human verification|人机验证|验证你是人类/.test(normalized);
   const verificationType =
@@ -2338,7 +2389,7 @@ export function classifyChatgptPostClickState({
   if (success) {
     status = "success";
     terminal = true;
-    message = `点击后状态：成功；${evidence || "页面出现付款或订阅完成信号。"}`;
+    message = `点击后状态：成功；${successEvidence || "页面出现付款或订阅完成信号。"}`;
   } else if (declined) {
     status = "declined";
     terminal = true;
@@ -2436,7 +2487,31 @@ async function collectChatgptPostClickState(cdp, rootSessionId, contexts, debugP
     }
   }
 
-  const pageSample = samples.find((sample) => /chatgpt\.com\/checkout|\/checkout\//i.test(String(sample?.href ?? "")));
+  if (Array.isArray(targets) && targets.length > 0) {
+    const targetCandidates = targets
+      .filter((target) => target?.webSocketDebuggerUrl && isLikelyChatgptPostClickTarget(target))
+      .sort((left, right) => scoreChatgptPostClickTarget(right) - scoreChatgptPostClickTarget(left));
+    for (const target of targetCandidates) {
+      let targetCdp = null;
+      try {
+        targetCdp = new CdpConnection(target.webSocketDebuggerUrl);
+        await targetCdp.send("Runtime.enable").catch(() => {});
+        const evaluation = await targetCdp.send("Runtime.evaluate", {
+          expression,
+          returnByValue: true,
+          awaitPromise: true,
+        });
+        const value = evaluation?.result?.value;
+        if (value && typeof value === "object") samples.push(value);
+      } catch {
+      } finally {
+        if (targetCdp) targetCdp.close();
+      }
+    }
+  }
+
+  const pageSample = samples.find((sample) => /chatgpt\.com\/checkout|\/checkout\//i.test(String(sample?.href ?? ""))) ||
+    samples.find((sample) => String(sample?.href ?? "").trim());
   return classifyChatgptPostClickState({
     samples,
     targetSummary: summarizeChatgptPostClickTargets(targets),
@@ -2464,8 +2539,9 @@ function emitChatgptPostClickRawSignals(emit, result = {}) {
 }
 
 async function monitorChatgptPostClickState(cdp, rootSessionId, contexts, emit, options = {}) {
-  const timeoutMs = Number.isFinite(options.postClickTimeoutMs) ? options.postClickTimeoutMs : 30000;
+  const timeoutMs = Number.isFinite(options.postClickTimeoutMs) ? options.postClickTimeoutMs : 75000;
   const deadline = Date.now() + timeoutMs;
+  const pollMs = Number.isFinite(options.postClickPollMs) ? options.postClickPollMs : 500;
   let latest = null;
   emit({
     type: "log",
@@ -2487,7 +2563,7 @@ async function monitorChatgptPostClickState(cdp, rootSessionId, contexts, emit, 
       emitChatgptPostClickRawSignals(emit, latest);
       return latest;
     }
-    await delay(800);
+    await delay(pollMs);
   }
 
   const result = latest ?? classifyChatgptPostClickState();

@@ -1521,6 +1521,33 @@ test("ChatGPT post-click status diagnostics classify success, decline, captcha, 
     }).status,
     "success",
   );
+  const subscribed = classifyChatgptPostClickState({
+    samples: [{
+      href: "https://chatgpt.com/",
+      title: "ChatGPT",
+      alerts: [],
+      rawSignals: ["已订阅"],
+      bodyText: "已订阅",
+      buttons: [],
+    }],
+  });
+  assert.equal(subscribed.status, "success");
+  assert.equal(subscribed.terminal, true);
+  assert.equal(subscribed.rawError, "");
+  assert.deepEqual(subscribed.rawSignals, ["已订阅"]);
+  assert.match(subscribed.message, /已订阅/);
+  const subscriptionActive = classifyChatgptPostClickState({
+    samples: [{
+      href: "https://chatgpt.com/",
+      title: "ChatGPT",
+      alerts: ["Subscription active"],
+      rawSignals: [],
+      bodyText: "",
+      buttons: [],
+    }],
+  });
+  assert.equal(subscriptionActive.status, "success");
+  assert.match(subscriptionActive.message, /Subscription active/);
   assert.equal(
     classifyChatgptPostClickState({
       samples: [{ href: "https://chatgpt.com/checkout/demo", title: "ChatGPT", alerts: ["Your card was declined"], buttons: [] }],
