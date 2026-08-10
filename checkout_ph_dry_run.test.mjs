@@ -1497,6 +1497,10 @@ test("ChatGPT shortlink card autofill orders country before state and supports s
 
 test("ChatGPT post-click status diagnostics classify success, decline, captcha, and processing", () => {
   assert.match(buildChatgptPostClickProbeExpression(), /aria-live/);
+  assert.match(buildChatgptPostClickProbeExpression(), /rawSignals/);
+  assert.match(buildChatgptPostClickProbeExpression(), /signalText/);
+  assert.match(buildChatgptPostClickProbeExpression(), /bodyText/);
+  assert.match(buildChatgptPostClickProbeExpression(), /innerText/);
   assert.deepEqual(
     summarizeChatgptPostClickTargets([
       { type: "page", url: "https://chatgpt.com/checkout/openai_llc/oaics_demo" },
@@ -1523,6 +1527,50 @@ test("ChatGPT post-click status diagnostics classify success, decline, captcha, 
     }).status,
     "declined",
   );
+  const notApproved = classifyChatgptPostClickState({
+    samples: [{
+      href: "https://chatgpt.com/checkout/demo",
+      title: "ChatGPT",
+      alerts: ["Payment was not approved"],
+      rawSignals: ["Payment was not approved"],
+      bodyText: "Payment was not approved",
+      buttons: [{ text: "Subscribe", disabled: false, busy: false }],
+    }],
+  });
+  assert.equal(notApproved.status, "declined");
+  assert.equal(notApproved.verificationType, null);
+  assert.match(notApproved.message, /Payment was not approved/);
+  assert.match(notApproved.evidence, /Payment was not approved/);
+  assert.match(notApproved.rawError, /Payment was not approved/);
+  assert.deepEqual(notApproved.rawSignals, ["Payment was not approved"]);
+  assert.deepEqual(notApproved.rawAlerts, ["Payment was not approved"]);
+  assert.equal(Object.hasOwn(notApproved, "rawBodyText"), false);
+  assert.equal(Object.hasOwn(notApproved, "rawButtons"), false);
+  const rawSignalDecline = classifyChatgptPostClickState({
+    samples: [{
+      href: "https://chatgpt.com/checkout/demo",
+      title: "ChatGPT",
+      alerts: [],
+      rawSignals: ["Payment was not approved"],
+      bodyText: "",
+      buttons: [],
+    }],
+  });
+  assert.equal(rawSignalDecline.status, "declined");
+  assert.deepEqual(rawSignalDecline.rawSignals, ["Payment was not approved"]);
+  const bodyOnlyDecline = classifyChatgptPostClickState({
+    samples: [{
+      href: "https://chatgpt.com/checkout/demo",
+      title: "ChatGPT",
+      alerts: [],
+      rawSignals: [],
+      bodyText: "快捷支付 Payment was not approved 使用 Google Pay 付款",
+      buttons: [],
+    }],
+  });
+  assert.equal(bodyOnlyDecline.status, "declined");
+  assert.equal(bodyOnlyDecline.rawError, "Payment was not approved");
+  assert.deepEqual(bodyOnlyDecline.rawSignals, ["Payment was not approved"]);
   assert.equal(
     classifyChatgptPostClickState({
       samples: [{ href: "https://chatgpt.com/checkout/demo", title: "ChatGPT", alerts: ["Verify you are human"], buttons: [] }],
@@ -1535,6 +1583,41 @@ test("ChatGPT post-click status diagnostics classify success, decline, captcha, 
     }).status,
     "processing",
   );
+  const threeDs = classifyChatgptPostClickState({
+    samples: [{ href: "https://chatgpt.com/checkout/demo", title: "3D Secure", alerts: [], bodyText: "3D Secure authentication required", buttons: [] }],
+  });
+  assert.equal(threeDs.status, "authentication_required");
+  assert.equal(threeDs.verificationType, "3ds");
+  assert.match(threeDs.message, /3DS/);
+  const otp = classifyChatgptPostClickState({
+    samples: [{ href: "https://chatgpt.com/checkout/demo", title: "ChatGPT", alerts: [], bodyText: "Enter the one-time passcode sent to your phone", buttons: [] }],
+  });
+  assert.equal(otp.status, "authentication_required");
+  assert.equal(otp.verificationType, "otp");
+  assert.match(otp.message, /一次性验证码/);
+  const bank = classifyChatgptPostClickState({
+    samples: [{ href: "https://chatgpt.com/checkout/demo", title: "ChatGPT", alerts: [], bodyText: "Confirm in your banking app to continue", buttons: [] }],
+  });
+  assert.equal(bank.status, "authentication_required");
+  assert.equal(bank.verificationType, "bank_verification");
+  assert.match(bank.message, /银行验证/);
+  const targetOnlyVerification = classifyChatgptPostClickState({
+    samples: [{
+      href: "https://chatgpt.com/checkout/demo",
+      title: "ChatGPT",
+      alerts: [],
+      rawSignals: [],
+      bodyText: "配置套餐 快捷支付 或 账单地址 Plus 套餐",
+      buttons: [],
+    }],
+    targetSummary: { authenticationTargets: 1 },
+  });
+  assert.equal(targetOnlyVerification.status, "verification_possible");
+  assert.equal(targetOnlyVerification.terminal, false);
+  assert.equal(targetOnlyVerification.authTargetDetected, true);
+  assert.equal(targetOnlyVerification.rawError, "");
+  assert.deepEqual(targetOnlyVerification.rawSignals, []);
+  assert.equal(Object.hasOwn(targetOnlyVerification, "rawBodyText"), false);
 });
 
 test("ChatGPT shortlink payment button locator highlights without submitting", () => {

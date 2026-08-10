@@ -2019,8 +2019,8 @@ function summarizePaymentButtonLocator(value = {}) {
 
 export function buildChatgptPostClickProbeExpression() {
   return `(() => {
-  function compact(value) {
-    return String(value ?? "").replace(/\\s+/g, " ").trim().slice(0, 240);
+  function compact(value, max = 500) {
+    return String(value ?? "").replace(/\\s+/g, " ").trim().slice(0, max);
   }
 
   function visible(element) {
@@ -2031,6 +2031,18 @@ export function buildChatgptPostClickProbeExpression() {
     return rect.width > 0 && rect.height > 0;
   }
 
+  const signalPattern = /payment was not approved|payment not approved|not approved|declined|payment failed|could(?: not|n't) complete|not accepted|insufficient funds|incorrect cvc|expired card|do not honor|3d secure|3ds|authenticate|one[- ]time passcode|otp|verification code|bank verification|bank app|captcha|human verification|verify you are human|付款失败|支付失败|银行卡拒绝|余额不足|人机验证|身份验证|银行验证|验证码|处理中|正在处理/i;
+  function signalText(element) {
+    const ownText = compact([...element.childNodes]
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => node.textContent)
+      .join(" "), 700);
+    const fullText = compact(element.textContent, 700);
+    const text = signalPattern.test(ownText) ? ownText : fullText;
+    if (!text || !signalPattern.test(text)) return "";
+    if (text.length > 360 && element.children.length > 0) return "";
+    return text;
+  }
   const signalNodes = [
     ...document.querySelectorAll(
       "[role='alert'], [aria-live], [data-testid*='error'], [data-testid*='status'], " +
@@ -2038,10 +2050,18 @@ export function buildChatgptPostClickProbeExpression() {
       "[class*='verif'], [class*='captcha']"
     )
   ];
+  const rawSignals = [...new Set([
+    ...signalNodes,
+    ...document.querySelectorAll("body *"),
+  ]
+    .filter(visible)
+    .map(signalText)
+    .filter(Boolean)
+  )].slice(0, 12);
   const alerts = [...new Set(
     signalNodes
       .filter(visible)
-      .map((element) => compact(element.textContent))
+      .map((element) => compact(element.textContent, 700))
       .filter(Boolean)
   )].slice(0, 8);
 
@@ -2059,7 +2079,9 @@ export function buildChatgptPostClickProbeExpression() {
     href: location.href,
     title: document.title,
     alerts,
+    rawSignals,
     buttons,
+    bodyText: compact(document.body?.innerText || "", 1500),
   };
 })();`;
 }
@@ -2086,6 +2108,103 @@ export function summarizeChatgptPostClickTargets(targets = []) {
   return summary;
 }
 
+function clipPostClickSnippet(source = "", phrase = "") {
+  const text = String(source ?? "").replace(/\s+/g, " ").trim();
+  const needle = String(phrase ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (!needle) return text.slice(0, 120);
+  const lowerText = text.toLowerCase();
+  const lowerNeedle = needle.toLowerCase();
+  const index = lowerText.indexOf(lowerNeedle);
+  if (index === -1) return "";
+  return text.slice(index, index + needle.length).trim();
+}
+
+function pickPostClickEvidence(sources = [], phrases = []) {
+  const rows = Array.isArray(sources) ? sources : [];
+  const needles = Array.isArray(phrases) ? phrases : [];
+  for (const source of rows) {
+    const text = String(source ?? "").trim();
+    if (!text) continue;
+    for (const phrase of needles) {
+      const candidate = String(phrase ?? "").trim();
+      if (!candidate) continue;
+      if (text.toLowerCase().includes(candidate.toLowerCase())) {
+        return clipPostClickSnippet(text, candidate);
+      }
+    }
+  }
+  if (needles.length > 0) return "";
+  const fallback = rows.find((value) => String(value ?? "").trim());
+  return fallback ? clipPostClickSnippet(fallback) : "";
+}
+
+function normalizePostClickRawText(value = "", max = 700) {
+  return redactText(String(value ?? "").replace(/\s+/g, " ").trim()).slice(0, max);
+}
+
+function uniquePostClickRawTexts(values = [], maxItems = 12, maxLength = 700) {
+  const seen = new Set();
+  const result = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const text = normalizePostClickRawText(value, maxLength);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+    if (result.length >= maxItems) break;
+  }
+  return result;
+}
+
+function pickKnownPostClickSignals(sources = [], phrases = [], maxItems = 12) {
+  const rows = Array.isArray(sources) ? sources : [];
+  const needles = Array.isArray(phrases) ? phrases : [];
+  const result = [];
+  const seen = new Set();
+  for (const source of rows) {
+    const text = String(source ?? "").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    for (const phrase of needles) {
+      const signal = clipPostClickSnippet(text, phrase);
+      if (!signal) continue;
+      const clean = normalizePostClickRawText(signal, 240);
+      const key = clean.toLowerCase();
+      if (!clean || seen.has(key)) continue;
+      if (result.some((item) => item.toLowerCase().includes(key))) continue;
+      for (let index = result.length - 1; index >= 0; index -= 1) {
+        if (key.includes(result[index].toLowerCase())) {
+          seen.delete(result[index].toLowerCase());
+          result.splice(index, 1);
+        }
+      }
+      seen.add(key);
+      result.push(clean);
+      if (result.length >= maxItems) return result;
+    }
+  }
+  return result;
+}
+
+function formatPostClickRawDetails(state = {}) {
+  const lines = [];
+  if (state.rawError) {
+    lines.push(`页面原始报错：${state.rawError}`);
+  }
+  const signals = Array.isArray(state.rawSignals)
+    ? state.rawSignals.filter((value) => value && value !== state.rawError)
+    : [];
+  if (signals.length > 0) {
+    lines.push(`页面原始信号：${signals.map((value, index) => `${index + 1}. ${value}`).join(" | ")}`);
+  }
+  const alerts = Array.isArray(state.rawAlerts)
+    ? state.rawAlerts.filter((value) => value && value !== state.rawError && !signals.includes(value))
+    : [];
+  if (alerts.length > 0) {
+    lines.push(`页面 alert/status 原文：${alerts.map((value, index) => `${index + 1}. ${value}`).join(" | ")}`);
+  }
+  return lines.join("\n");
+}
+
 export function classifyChatgptPostClickState({
   samples = [],
   targetSummary = {},
@@ -2093,19 +2212,123 @@ export function classifyChatgptPostClickState({
 } = {}) {
   const rows = Array.isArray(samples) ? samples : [];
   const alerts = rows.flatMap((sample) => Array.isArray(sample?.alerts) ? sample.alerts : []);
+  const rawSignals = [...new Set(rows.flatMap((sample) => Array.isArray(sample?.rawSignals) ? sample.rawSignals : []))]
+    .filter(Boolean)
+    .slice(0, 12);
   const buttons = rows.flatMap((sample) => Array.isArray(sample?.buttons) ? sample.buttons : []);
+  const bodyTexts = rows.map((sample) => typeof sample?.bodyText === "string" ? sample.bodyText : "").filter(Boolean);
   const text = [
+    ...rawSignals,
     ...alerts,
+    ...bodyTexts,
     ...buttons.map((button) => button.text),
     ...rows.map((sample) => sample?.title),
   ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
-  const evidence = alerts.find(Boolean) || "";
+  const evidenceSources = [
+    ...rawSignals,
+    ...alerts,
+    ...bodyTexts,
+    ...buttons.map((button) => button.text).filter(Boolean),
+    ...rows.map((sample) => sample?.title).filter(Boolean),
+  ];
+  const declinedPhrases = [
+    "Payment was not approved",
+    "payment was not approved",
+    "payment not approved",
+    "not approved",
+    "card declined",
+    "payment declined",
+    "payment failed",
+    "declined",
+    "could not complete",
+    "couldn't complete",
+    "not accepted",
+    "insufficient funds",
+    "incorrect cvc",
+    "expired card",
+    "do not honor",
+    "付款失败",
+    "支付失败",
+    "银行卡拒绝",
+    "余额不足",
+  ];
+  const captchaPhrases = [
+    "captcha",
+    "human verification",
+    "verify you are human",
+    "verify your humanity",
+    "prove you are human",
+    "人机验证",
+    "验证你是人类",
+  ];
+  const verificationPhrases = [
+    "3D Secure",
+    "3DS",
+    "3d secure",
+    "authenticate your card",
+    "authenticate payment",
+    "additional authentication",
+    "verification required",
+    "one-time passcode",
+    "one time passcode",
+    "otp",
+    "verification code",
+    "code sent to your phone",
+    "text message code",
+    "sms code",
+    "email code",
+    "bank verification",
+    "bank app",
+    "banking app",
+    "verify in your banking app",
+    "confirm in your banking app",
+  ];
+  const processingPhrases = [
+    "processing",
+    "pending",
+    "please wait",
+    "please hold",
+    "loading",
+    "still working",
+    "正在处理",
+    "处理中",
+    "请稍候",
+  ];
+  const declinedSignals = pickKnownPostClickSignals(evidenceSources, declinedPhrases);
+  const captchaSignals = pickKnownPostClickSignals(evidenceSources, captchaPhrases);
+  const verificationSignals = pickKnownPostClickSignals(evidenceSources, verificationPhrases);
+  const processingSignals = pickKnownPostClickSignals(evidenceSources, processingPhrases);
+  const rawError = firstString(
+    declinedSignals[0],
+    captchaSignals[0],
+    verificationSignals[0],
+    processingSignals[0],
+  ) || "";
+  const normalizedRawSignals = [
+    ...declinedSignals,
+    ...captchaSignals,
+    ...verificationSignals,
+    ...processingSignals,
+  ].filter((value, index, array) => array.findIndex((item) => item.toLowerCase() === value.toLowerCase()) === index).slice(0, 12);
+  const rawAlerts = pickKnownPostClickSignals(alerts, [
+    ...declinedPhrases,
+    ...captchaPhrases,
+    ...verificationPhrases,
+    ...processingPhrases,
+  ]);
+  const evidence = rawError;
   const normalized = text.toLowerCase();
   const success = /payment (?:successful|succeeded|complete)|payment complete|subscription (?:active|confirmed)|you're subscribed|all set|thank you for subscribing|付款成功|支付成功|订阅成功/.test(normalized);
-  const declined = /card (?:was )?declined|payment (?:failed|declined)|could(?: not|n't) complete|not accepted|insufficient funds|incorrect cvc|expired card|do not honor|payment failed|付款失败|支付失败|银行卡.*拒绝|余额不足/.test(normalized);
+  const declined = /payment was not approved|payment not approved|card (?:was )?declined|payment (?:failed|declined)|could(?: not|n't) complete|not accepted|insufficient funds|incorrect cvc|expired card|do not honor|payment failed|付款失败|支付失败|银行卡.*拒绝|余额不足/.test(normalized);
   const captcha = /captcha|verify you are human|human verification|人机验证|验证你是人类/.test(normalized);
-  const authentication = /3d secure|3ds|additional authentication|authenticate|one[- ]time passcode|otp|bank verification|身份验证|银行验证|验证码/.test(normalized) ||
-    Number(targetSummary.authenticationTargets) > 0;
+  const verificationType =
+    /3d secure|3ds|3-d secure|authenticate your card|authenticate payment/.test(normalized) ? "3ds" :
+      /one[- ]time passcode|otp|verification code|code sent to your phone|text message code|sms code|email code/.test(normalized) ? "otp" :
+        /bank verification|bank app|banking app|verify in your banking app|confirm in your banking app/.test(normalized) ? "bank_verification" :
+          /additional authentication|verification required|authenticate|身份验证|银行验证|验证码/.test(normalized) ? "authentication" : null;
+  const authTargetDetected = Number(targetSummary.authenticationTargets) > 0;
+  const authentication = verificationType !== null;
+  const authTargetOnly = authTargetDetected && !authentication;
   const busy = buttons.some((button) => button?.disabled || button?.busy) ||
     /processing|pending|正在处理|处理中|请稍候|loading/.test(normalized);
 
@@ -2115,7 +2338,7 @@ export function classifyChatgptPostClickState({
   if (success) {
     status = "success";
     terminal = true;
-    message = "点击后状态：成功；页面出现付款或订阅完成信号。";
+    message = `点击后状态：成功；${evidence || "页面出现付款或订阅完成信号。"}`;
   } else if (declined) {
     status = "declined";
     terminal = true;
@@ -2127,10 +2350,22 @@ export function classifyChatgptPostClickState({
   } else if (authentication) {
     status = "authentication_required";
     terminal = true;
-    message = "点击后状态：需要额外验证，可能是 3DS、银行验证或一次性验证码。";
+    const verificationLabels = {
+      "3ds": "3DS",
+      otp: "一次性验证码",
+      bank_verification: "银行验证",
+      authentication: "额外验证",
+    };
+    const label = verificationLabels[verificationType] || "额外验证";
+    message = `点击后状态：需要额外验证（${label}）；${evidence || "页面出现 3DS、OTP 或银行验证信号。"}`;
   } else if (busy) {
     status = "processing";
-    message = "点击后状态：处理中；页面仍在等待最终结果。";
+    message = `点击后状态：处理中；${evidence || "页面仍在等待最终结果。"}`;
+  } else if (authTargetOnly) {
+    status = "verification_possible";
+    message = "点击后状态：疑似需要额外验证；页面检测到认证组件，但还没有出现明确的 3DS、OTP 或银行验证文案。";
+  } else {
+    message = "点击后状态：未识别；页面还没有返回可确认的结果。";
   }
 
   return {
@@ -2138,7 +2373,12 @@ export function classifyChatgptPostClickState({
     terminal,
     currentUrl: firstString(currentUrl, rows.find((sample) => sample?.href)?.href),
     title: firstString(rows.find((sample) => sample?.title)?.title),
-    evidence: redactText(evidence).slice(0, 240),
+    evidence: rawError,
+    rawError,
+    rawSignals: normalizedRawSignals,
+    rawAlerts,
+    verificationType,
+    authTargetDetected,
     targetSummary: {
       checkoutPages: Number(targetSummary.checkoutPages) || 0,
       stripeTargets: Number(targetSummary.stripeTargets) || 0,
@@ -2204,8 +2444,27 @@ async function collectChatgptPostClickState(cdp, rootSessionId, contexts, debugP
   });
 }
 
+function emitChatgptPostClickRawSignals(emit, result = {}) {
+  const signals = [
+    result.rawError,
+    ...(Array.isArray(result.rawSignals) ? result.rawSignals : []),
+    ...(Array.isArray(result.rawAlerts) ? result.rawAlerts : []),
+  ]
+    .map((value) => String(value ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const uniqueSignals = [...new Set(signals)];
+  if (uniqueSignals.length === 0) return;
+  emit({
+    type: "log",
+    time: new Date().toISOString(),
+    stage: "payment",
+    level: result.status === "success" ? "info" : "error",
+    message: `页面原始提示：${uniqueSignals.map((value, index) => `${index + 1}. ${value}`).join(" | ")}`,
+  });
+}
+
 async function monitorChatgptPostClickState(cdp, rootSessionId, contexts, emit, options = {}) {
-  const timeoutMs = Number.isFinite(options.postClickTimeoutMs) ? options.postClickTimeoutMs : 15000;
+  const timeoutMs = Number.isFinite(options.postClickTimeoutMs) ? options.postClickTimeoutMs : 30000;
   const deadline = Date.now() + timeoutMs;
   let latest = null;
   emit({
@@ -2225,6 +2484,7 @@ async function monitorChatgptPostClickState(cdp, rootSessionId, contexts, emit, 
         level: latest.status === "success" ? "info" : "error",
         message: latest.message,
       });
+      emitChatgptPostClickRawSignals(emit, latest);
       return latest;
     }
     await delay(800);
@@ -2235,7 +2495,9 @@ async function monitorChatgptPostClickState(cdp, rootSessionId, contexts, emit, 
     ...result,
     timedOut: true,
     message: result.status === "processing"
-      ? "点击后状态：仍在处理中；监控窗口结束，尚未收到最终结果。"
+      ? `点击后状态：仍在处理中；监控窗口结束，尚未收到最终结果。${result.evidence ? ` 页面信号：${result.evidence}` : ""}`
+      : result.status === "verification_possible"
+        ? `点击后状态：疑似需要额外验证；监控窗口结束，仍未出现明确的 3DS、OTP 或银行验证文案。${result.rawError ? ` 页面原始提示：${result.rawError}` : ""}`
       : result.message,
   };
   emit({
@@ -2245,6 +2507,7 @@ async function monitorChatgptPostClickState(cdp, rootSessionId, contexts, emit, 
     level: "error",
     message: timeoutResult.message,
   });
+  emitChatgptPostClickRawSignals(emit, timeoutResult);
   return timeoutResult;
 }
 
