@@ -47,10 +47,12 @@ PLATFORM_ADMIN_PASSWORD=change-this-password
 PLATFORM_ADMIN_TOKEN=change-this-token
 PLATFORM_AUTO_WORKER=1
 PLATFORM_QUEUE_INTERVAL_MS=1000
+PLATFORM_SEED_DEV_CODES=0
 APP_SECRET_KEY=change-this-long-secret
 ```
 
 The platform stores runtime state in SQLite. Keep `PLATFORM_DB_PATH` outside git-tracked files in production.
+Set `PLATFORM_SEED_DEV_CODES=0` for public deployments so the local demo redeem codes are not created.
 
 ## Production Domains
 

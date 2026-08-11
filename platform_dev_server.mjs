@@ -11,6 +11,7 @@ const adminToken = process.env.PLATFORM_ADMIN_TOKEN || "dev-admin-token";
 const adminPassword = process.env.PLATFORM_ADMIN_PASSWORD || "Admin-Change-2026!";
 const autoQueueWorker = process.env.PLATFORM_AUTO_WORKER !== "0";
 const queueWorkerIntervalMs = Number(process.env.PLATFORM_QUEUE_INTERVAL_MS || 1000);
+const seedDevCodes = process.env.PLATFORM_SEED_DEV_CODES !== "0";
 
 const seedCodes = [
   { plan_type: "go", code: "GO-LOCAL-0001" },
@@ -20,6 +21,7 @@ const seedCodes = [
 ];
 
 function seedDevData(store) {
+  if (!seedDevCodes) return [];
   const existing = store.listRedeemCodes({});
   if (existing.length > 0) return existing.map((row) => row.code_display);
   const created = [];
@@ -61,18 +63,24 @@ const app = await listenPlatformServer({
   },
 });
 
-console.log(`gpt-auto-pay platform dev API listening at ${app.url}`);
+console.log(`gpt-auto-pay platform API listening at ${app.url}`);
 console.log(`database: ${dbPath}`);
-console.log(`admin token: ${adminToken}`);
-console.log(`admin login: admin / ${adminPassword}`);
+console.log(`admin token: ${adminToken ? "<configured>" : "<empty>"}`);
+console.log(`admin login: admin / <configured password>`);
 console.log(`auto queue worker: ${autoQueueWorker ? `enabled (${queueWorkerIntervalMs}ms)` : "disabled"}`);
-console.log("seed redeem codes:");
-for (const code of codes) console.log(`  ${code}`);
+if (seedDevCodes) {
+  console.log("seed redeem codes:");
+  for (const code of codes) console.log(`  ${code}`);
+} else {
+  console.log("seed redeem codes: disabled");
+}
 console.log("");
 console.log("examples:");
 console.log(`  curl ${app.url}/health`);
-console.log(`  curl -H "content-type: application/json" -d "{\\"code\\":\\"PLUS-LOCAL-0001\\"}" ${app.url}/api/public/redeem`);
-console.log(`  curl -H "x-admin-token: ${adminToken}" ${app.url}/api/admin/dashboard`);
+if (seedDevCodes) {
+  console.log(`  curl -H "content-type: application/json" -d "{\\"code\\":\\"PLUS-LOCAL-0001\\"}" ${app.url}/api/public/redeem`);
+}
+console.log(`  curl -H "x-admin-token: <admin-token>" ${app.url}/api/admin/dashboard`);
 
 async function shutdown() {
   await app.close();
