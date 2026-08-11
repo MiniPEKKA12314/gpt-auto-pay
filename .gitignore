@@ -12,6 +12,7 @@ output/
 _repo_extract/
 .worktrees/
 node_modules/
+.venv/
 playwright-report/
 test-results/
 checkout_ph_browser_package/
