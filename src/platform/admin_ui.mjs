@@ -946,6 +946,18 @@ export function renderAdminUi(options = {}) {
       window.setTimeout(function() { box.remove(); }, 3500);
     }
 
+    function scrollToBottom(node) {
+      if (!node) return;
+      node.scrollTop = node.scrollHeight;
+    }
+
+    function setScrollableHtml(id, html) {
+      const node = $(id);
+      if (!node) return;
+      node.innerHTML = html || "";
+      scrollToBottom(node);
+    }
+
     async function api(path, options) {
       const response = await fetch(path, Object.assign({
         credentials: "same-origin",
@@ -1656,7 +1668,7 @@ export function renderAdminUi(options = {}) {
       $("queueWorkerState").className = "pill " + (queue.worker && queue.worker.enabled && queue.worker.started ? "ok" : "warn");
       if (document.activeElement !== $("queueConcurrency")) $("queueConcurrency").value = queue.concurrency || 1;
       $("queueOutput").textContent = queueSummaryText(queue);
-      if ($("liveRunLogsOutput")) $("liveRunLogsOutput").innerHTML = formatDashboardRunLogs(dashboard.recent_logs || []);
+      setScrollableHtml("liveRunLogsOutput", formatDashboardRunLogs(dashboard.recent_logs || []));
       const queuedOrders = Array.isArray(dashboard.queued_orders)
         ? dashboard.queued_orders
         : state.orders.filter(function(order) { return order.status === "queued"; }).slice(0, 20);
@@ -1833,8 +1845,8 @@ export function renderAdminUi(options = {}) {
       const html = typeof detail === "object" && detail ? detail.html : String(detail || "");
       const text = typeof detail === "object" && detail ? detail.text : String(detail || "");
       state.orderDetailPlainText = text || "";
-      if ($("orderDetailOutput")) $("orderDetailOutput").innerHTML = html || "";
-      if ($("recentOrderDetailOutput")) $("recentOrderDetailOutput").innerHTML = html || "";
+      setScrollableHtml("orderDetailOutput", html || "");
+      setScrollableHtml("recentOrderDetailOutput", html || "");
     }
 
     function renderAudits() {

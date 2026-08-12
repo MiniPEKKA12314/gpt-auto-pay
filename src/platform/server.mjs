@@ -94,7 +94,24 @@ function isPublicOnlyBlockedPath(pathname) {
 
 function cookieDomainForHost(host, allowedHosts) {
   const normalized = normalizeHostHeader(host);
-  return isHostAllowed(normalized, allowedHosts) ? normalized : "";
+  if (!isHostAllowed(normalized, allowedHosts)) return "";
+  if (!normalized.includes(".")) return "";
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(normalized)) return "";
+  return normalized;
+}
+
+function adminSessionCookies(sessionId, host, adminHosts, options = {}) {
+  const cookies = [buildAdminSessionCookie(sessionId, options)];
+  const domain = cookieDomainForHost(host, adminHosts);
+  if (domain) cookies.push(buildAdminSessionCookie(sessionId, { ...options, domain }));
+  return cookies;
+}
+
+function clearAdminSessionCookies(host, adminHosts) {
+  const cookies = [clearAdminSessionCookie()];
+  const domain = cookieDomainForHost(host, adminHosts);
+  if (domain) cookies.push(clearAdminSessionCookie({ domain }));
+  return cookies;
 }
 
 function adminAuth(req, adminToken, url) {
@@ -424,7 +441,6 @@ export function createPlatformRequestHandler(options = {}) {
           after: { username: admin.username },
         });
         const secureCookie = String(req.headers["x-forwarded-proto"] || "").toLowerCase() === "https";
-        const adminCookieDomain = cookieDomainForHost(host, adminHosts);
         sendJson(res, 200, {
           ok: true,
           data: {
@@ -432,7 +448,7 @@ export function createPlatformRequestHandler(options = {}) {
             expires_at: session.expires_at,
           },
         }, {
-          "set-cookie": buildAdminSessionCookie(session.id, { maxAgeSeconds: 12 * 60 * 60, secure: secureCookie, domain: adminCookieDomain }),
+          "set-cookie": adminSessionCookies(session.id, host, adminHosts, { maxAgeSeconds: 12 * 60 * 60, secure: secureCookie }),
         });
         return;
       }
@@ -440,7 +456,7 @@ export function createPlatformRequestHandler(options = {}) {
       if (req.method === "POST" && url.pathname === "/api/admin/logout") {
         const sessionId = parseCookies(req).get(ADMIN_SESSION_COOKIE);
         if (sessionId) store.deleteAdminSession(sessionId);
-        sendJson(res, 200, { ok: true }, { "set-cookie": clearAdminSessionCookie({ domain: cookieDomainForHost(host, adminHosts) }) });
+        sendJson(res, 200, { ok: true }, { "set-cookie": clearAdminSessionCookies(host, adminHosts) });
         return;
       }
 

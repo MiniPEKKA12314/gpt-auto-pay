@@ -63,7 +63,7 @@ export function parseCookies(req) {
 
 export function buildAdminSessionCookie(sessionId, options = {}) {
   const maxAge = Number(options.maxAgeSeconds ?? 12 * 60 * 60);
-  const secure = options.secure ? "; Secure" : "";
+  const secure = options.secure ? "Secure" : "";
   const domain = String(options.domain ?? "").trim();
   const domainPart = domain ? `Domain=${domain}` : "";
   return [

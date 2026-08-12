@@ -352,7 +352,35 @@ export function renderPublicUi(options = {}) {
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const LAST_ORDER_KEY = "gpt_auto_pay_last_order";
+    const DRAFT_KEY = "gpt_auto_pay_public_draft";
     let pollTimer = null;
+
+    function saveDraft(extra = {}) {
+      try {
+        const current = loadDraft();
+        const data = {
+          code: $("codeInput") ? $("codeInput").value : current.code || "",
+          credential: $("credentialInput") ? $("credentialInput").value : current.credential || "",
+          orderId: $("orderInput") ? $("orderInput").value : current.orderId || "",
+          updatedAt: Date.now(),
+          ...extra
+        };
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(data));
+      } catch {}
+    }
+
+    function loadDraft() {
+      try {
+        return JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}") || {};
+      } catch {
+        return {};
+      }
+    }
+
+    function clearDraft() {
+      try { localStorage.removeItem(DRAFT_KEY); } catch {}
+    }
 
     function setStep(name) {
       $("stepWait").textContent = name === "done" ? "3. 完成" : "3. 等待";
@@ -396,14 +424,12 @@ export function renderPublicUi(options = {}) {
       const orderLine = data && data.order_id ? '<div class="mono muted">' + escapeHtml(data.order_id) + '</div>' : "";
       const planLine = data && data.plan_name ? '<div>套餐：' + escapeHtml(data.plan_name) + '</div>' : "";
       box.innerHTML = '<strong>' + escapeHtml(statusLabel(data && data.status)) + '</strong>' + planLine + '<div>' + escapeHtml((data && data.message) || "") + '</div>' + orderLine;
-      if (data && isTerminalStatus(data.status)) {
-        localStorage.removeItem("gpt_auto_pay_last_order");
-      }
       if (data && data.order_id) {
         $("orderInput").value = data.order_id;
         if (isPendingStatus(data.status)) {
-          localStorage.setItem("gpt_auto_pay_last_order", data.order_id);
+          localStorage.setItem(LAST_ORDER_KEY, data.order_id);
         }
+        saveDraft({ orderId: data.order_id, lastStatus: data.status });
       }
       if (data && isTerminalStatus(data.status) && pollTimer) {
         window.clearInterval(pollTimer);
@@ -652,6 +678,7 @@ export function renderPublicUi(options = {}) {
           body: JSON.stringify(payload)
         });
         renderStatus(result.data);
+        saveDraft({ code, orderId: result.data.order_id, lastStatus: result.data.status });
         startPolling(result.data.order_id);
       } catch (error) {
         renderStatus({ status: "failed", message: (error.data && error.data.message) || error.message });
@@ -669,6 +696,7 @@ export function renderPublicUi(options = {}) {
           body: JSON.stringify({ code: code })
         });
         renderStatus(result.data);
+        saveDraft({ code, orderId: result.data.order_id, lastStatus: result.data.status });
         startPolling(result.data.order_id);
       } catch (error) {
         renderStatus({ status: "failed", message: (error.data && error.data.message) || error.message });
@@ -681,6 +709,7 @@ export function renderPublicUi(options = {}) {
       try {
         const result = await requestJson("/api/public/orders/" + encodeURIComponent(orderId));
         renderStatus(result.data);
+        saveDraft({ orderId: result.data.order_id, lastStatus: result.data.status });
         return result.data;
       } catch (error) {
         renderStatus({ status: "failed", message: (error.data && error.data.message) || error.message });
@@ -689,7 +718,8 @@ export function renderPublicUi(options = {}) {
     }
 
     async function refreshCurrentOrder() {
-      const orderId = $("orderInput").value.trim() || localStorage.getItem("gpt_auto_pay_last_order") || "";
+      const draft = loadDraft();
+      const orderId = $("orderInput").value.trim() || localStorage.getItem(LAST_ORDER_KEY) || draft.orderId || "";
       if (!orderId) return renderStatus({ status: "created", message: "暂无订单号，请先提交订单或输入订单号查询" });
       $("orderInput").value = orderId;
       return queryOrder();
@@ -716,12 +746,22 @@ export function renderPublicUi(options = {}) {
     $("refreshStatusBtn").addEventListener("click", refreshCurrentOrder);
     $("clearBtn").addEventListener("click", function() {
       $("orderInput").value = "";
-      localStorage.removeItem("gpt_auto_pay_last_order");
+      $("codeInput").value = "";
+      $("credentialInput").value = "";
+      localStorage.removeItem(LAST_ORDER_KEY);
+      clearDraft();
       renderStatus({ status: "created", message: "等待提交" });
       setStep("code");
     });
 
-    const lastOrder = localStorage.getItem("gpt_auto_pay_last_order");
+    $("codeInput").addEventListener("input", function() { saveDraft(); });
+    $("credentialInput").addEventListener("input", function() { saveDraft(); });
+    $("orderInput").addEventListener("input", function() { saveDraft(); });
+
+    const draft = loadDraft();
+    const lastOrder = localStorage.getItem(LAST_ORDER_KEY) || draft.orderId || "";
+    if (draft.code) $("codeInput").value = draft.code;
+    if (draft.credential) $("credentialInput").value = draft.credential;
     if (lastOrder) {
       $("orderInput").value = lastOrder;
       queryOrder();
