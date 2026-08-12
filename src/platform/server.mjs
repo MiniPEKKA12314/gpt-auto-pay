@@ -10,6 +10,7 @@ import { PlatformStoreError } from "./db.mjs";
 import { OrderStatus } from "./constants.mjs";
 import { createPlatformPaymentAdapterFactory } from "./order_processor.mjs";
 import { publicOrderSummary } from "./orders.mjs";
+import { testProxyConnectivity } from "./proxy_connectivity.mjs";
 import { selectProxyForAttemptAsync } from "./proxy_pool.mjs";
 import { renderPublicUi } from "./public_ui.mjs";
 import { normalizeRedeemCode } from "./redeem.mjs";
@@ -250,6 +251,7 @@ export function createPlatformRequestHandler(options = {}) {
   const adminToken = options.adminToken ?? "";
   const queueAdapterFactory = options.queueAdapterFactory ?? createPlatformPaymentAdapterFactory({ store });
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const proxyConnectivityTester = options.proxyConnectivityTester ?? testProxyConnectivity;
   const workerStatusProvider = typeof options.workerStatusProvider === "function" ? options.workerStatusProvider : null;
 
   return async function platformRequestHandler(req, res) {
@@ -1156,8 +1158,17 @@ export function createPlatformRequestHandler(options = {}) {
           attemptIndex: body.attempt_index ?? body.attemptIndex ?? 0,
           fetchImpl,
         });
+        const connectivity = result.proxyUrl
+          ? await proxyConnectivityTester(result.proxyUrl, {
+              test_url: body.test_url ?? body.testUrl,
+              timeout_ms: body.timeout_ms ?? body.timeoutMs,
+            })
+          : {
+              ok: false,
+              message: result.reason ? `代理组没有可测试的代理：${result.reason}` : "代理组没有可测试的代理",
+            };
         sendJson(res, 200, {
-          ok: !result.reason,
+          ok: !result.reason && connectivity.ok === true,
           data: {
             provider: result.provider,
             kind: result.kind,
@@ -1166,7 +1177,9 @@ export function createPlatformRequestHandler(options = {}) {
             redactedProxyUrl: result.redactedProxyUrl,
             api: result.api,
             ipwo: result.ipwo,
+            connectivity,
           },
+          message: connectivity.message,
         });
         return;
       }

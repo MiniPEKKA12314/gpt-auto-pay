@@ -97,6 +97,16 @@ export function classifyAttemptResult(result = {}) {
   }
 
   const text = textOf(result);
+  if (/missing x server|\$display|platform failed to initialize|chrome exited before devtools became available|no usable sandbox/.test(text)) {
+    return {
+      ok: false,
+      category: "runtime_environment",
+      retry_proxy: false,
+      switch_card: false,
+      terminal: true,
+    };
+  }
+
   if (/proxy|socks|connect|tunnel|econnreset|timeout|timed out|ssl|packet length|403|429|captcha|human verification|verify you are human|card_input_frame_not_mounted|payment_targets_unavailable|page_load_failed|chrome-error/.test(text)) {
     return {
       ok: false,

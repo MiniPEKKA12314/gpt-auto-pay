@@ -49,6 +49,16 @@ test("attempt classifier separates proxy/page issues, declined cards, verificati
   assert.equal(classifyAttemptResult({ status: "failed", message: "Invalid HTTP response from proxy tunnel" }).category, "proxy_or_page");
   assert.equal(classifyAttemptResult({ status: "failed", message: "Payment was not approved" }).category, "card_declined");
   assert.equal(classifyAttemptResult({ status: "failed", code: "DIRECT_CARD_AUTH_REQUIRED" }).category, "verification_required");
+  assert.deepEqual(
+    classifyAttemptResult({ status: "failed", message: "Chrome exited before DevTools became available: Missing X server or $DISPLAY" }),
+    {
+      ok: false,
+      category: "runtime_environment",
+      retry_proxy: false,
+      switch_card: false,
+      terminal: true,
+    },
+  );
   assert.equal(classifyAttemptResult({ status: "failed", message: "runner returned empty result" }).category, "unknown");
 });
 

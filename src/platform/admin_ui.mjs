@@ -895,7 +895,8 @@ export function renderAdminUi(options = {}) {
       autoRefreshTimer: null,
       autoRefreshBusy: false,
       openOrderDetailId: 0,
-      planFormDirty: false
+      planFormDirty: false,
+      selectedPlanType: ""
     };
 
     function h(value) {
@@ -1480,10 +1481,19 @@ export function renderAdminUi(options = {}) {
     }
 
     function populateSelects() {
+      const currentPlanType = state.selectedPlanType || ($("planSelect") && $("planSelect").value) || "";
       const planOptions = state.plans.map(function(plan) {
         return '<option value="' + h(plan.plan_type) + '">' + h(plan.display_name) + '</option>';
       }).join("");
-      if (!state.planFormDirty) $("planSelect").innerHTML = planOptions;
+      if (!state.planFormDirty) {
+        $("planSelect").innerHTML = planOptions;
+        if (currentPlanType && state.plans.some(function(plan) { return plan.plan_type === currentPlanType; })) {
+          $("planSelect").value = currentPlanType;
+          state.selectedPlanType = currentPlanType;
+        } else if ($("planSelect").value) {
+          state.selectedPlanType = $("planSelect").value;
+        }
+      }
       setSelectHtml("manualPlan", planOptions);
       $("cardGroupSelect").innerHTML = optionHtml(state.cardGroups, "id", function(row) { return "#" + row.id + " " + row.name; }, "", "请选择卡组");
       $("vccImportCardGroup").innerHTML = optionHtml(state.cardGroups, "id", function(row) { return "#" + row.id + " " + row.name; }, "", "请选择卡组");
@@ -1588,7 +1598,7 @@ export function renderAdminUi(options = {}) {
     }
 
     function selectedPlan() {
-      const planType = $("planSelect").value || (state.plans[0] && state.plans[0].plan_type);
+      const planType = state.selectedPlanType || $("planSelect").value || (state.plans[0] && state.plans[0].plan_type);
       return state.plans.find(function(plan) { return plan.plan_type === planType; }) || state.plans[0] || null;
     }
 
@@ -1596,6 +1606,7 @@ export function renderAdminUi(options = {}) {
       if (state.planFormDirty && options.force !== true) return;
       const plan = selectedPlan();
       if (!plan) return;
+      state.selectedPlanType = plan.plan_type;
       $("planSelect").value = plan.plan_type;
       $("planDisplayName").value = plan.display_name || "";
       $("planCountry").value = plan.payment_country || "";
@@ -1791,6 +1802,7 @@ export function renderAdminUi(options = {}) {
     async function savePlan(event) {
       event.preventDefault();
       const planType = $("planSelect").value;
+      state.selectedPlanType = planType;
       const payload = {
         display_name: $("planDisplayName").value,
         enabled: $("planEnabled").checked,
@@ -1812,14 +1824,19 @@ export function renderAdminUi(options = {}) {
       });
       $("planOutput").textContent = JSON.stringify(result, null, 2);
       await loadPlans();
+      state.selectedPlanType = planType;
       state.planFormDirty = false;
-      renderPlans();
+      populateSelects();
+      syncPlanForm({ force: true });
       showToast("套餐配置已保存", "ok");
     }
 
     async function checkReadiness() {
       const planType = $("planSelect").value;
+      state.selectedPlanType = planType;
       const result = await api("/api/admin/plans/" + encodeURIComponent(planType) + "/runtime-readiness");
+      state.selectedPlanType = planType;
+      $("planSelect").value = planType;
       $("planOutput").textContent = JSON.stringify(result, null, 2);
     }
 
@@ -2121,10 +2138,11 @@ export function renderAdminUi(options = {}) {
     async function testProxyGroup(groupId) {
       const result = await api("/api/admin/proxy-groups/" + groupId + "/test", {
         method: "POST",
-        body: JSON.stringify({ attempt_index: 0 })
+        body: JSON.stringify({ attempt_index: 0, timeout_ms: 15000 })
       });
       $("proxyOutput").textContent = JSON.stringify(result, null, 2);
-      showToast(result.ok ? "代理测试完成" : "代理测试未通过", result.ok ? "ok" : "bad");
+      const connectivity = result.data && result.data.connectivity;
+      showToast(result.ok ? (connectivity && connectivity.message ? connectivity.message : "\u4ee3\u7406\u8fde\u901a\u6027\u6d4b\u8bd5\u901a\u8fc7") : ((connectivity && connectivity.message) || result.message || "\u4ee3\u7406\u8fde\u901a\u6027\u6d4b\u8bd5\u672a\u901a\u8fc7"), result.ok ? "ok" : "bad");
     }
 
     async function changePassword(event) {
@@ -2250,6 +2268,7 @@ export function renderAdminUi(options = {}) {
       if (event.target && event.target.id !== "planSelect") state.planFormDirty = true;
     });
     $("planSelect").addEventListener("change", function() {
+      state.selectedPlanType = $("planSelect").value;
       state.planFormDirty = false;
       syncPlanForm({ force: true });
     });

@@ -35,6 +35,7 @@ async function createTestApp(options = {}) {
     autoQueueWorker: options.autoQueueWorker,
     queueWorkerIntervalMs: options.queueWorkerIntervalMs,
     recoverRunningOnStart: options.recoverRunningOnStart,
+    proxyConnectivityTester: options.proxyConnectivityTester,
   });
   return {
     ...app,
@@ -1080,7 +1081,20 @@ test("admin proxy group APIs support IPWO dynamic provider test", async () => {
     request_ip: "127.0.0.1",
     data: [{ ip: "8.8.8.8", port: 8888 }],
   }), { status: 200, headers: { "content-type": "application/json" } });
-  const app = await createTestApp({ adminToken: "admin-token", fetchImpl });
+  const testedProxyUrls = [];
+  const app = await createTestApp({
+    adminToken: "admin-token",
+    fetchImpl,
+    proxyConnectivityTester: async (proxyUrl) => {
+      testedProxyUrls.push(proxyUrl);
+      return {
+        ok: true,
+        status: 200,
+        ip: "8.8.8.8",
+        message: "代理连通性测试成功，出口 IP: 8.8.8.8",
+      };
+    },
+  });
   try {
     const created = await jsonFetch(`${app.url}/api/admin/proxy-groups`, {
       method: "POST",
@@ -1110,13 +1124,27 @@ test("admin proxy group APIs support IPWO dynamic provider test", async () => {
     assert.equal(tested.body.ok, true);
     assert.equal(tested.body.data.redactedProxyUrl, "http://8.8.8.8:8888/");
     assert.equal(tested.body.data.api.count, 1);
+    assert.deepEqual(testedProxyUrls, ["http://8.8.8.8:8888"]);
+    assert.equal(tested.body.data.connectivity.ip, "8.8.8.8");
   } finally {
     await app.closeAll();
   }
 });
 
 test("admin proxy group APIs support IPWO credential provider test", async () => {
-  const app = await createTestApp({ adminToken: "admin-token" });
+  const testedProxyUrls = [];
+  const app = await createTestApp({
+    adminToken: "admin-token",
+    proxyConnectivityTester: async (proxyUrl) => {
+      testedProxyUrls.push(proxyUrl);
+      return {
+        ok: true,
+        status: 200,
+        ip: "1.2.3.4",
+        message: "代理连通性测试成功，出口 IP: 1.2.3.4",
+      };
+    },
+  });
   try {
     const created = await jsonFetch(`${app.url}/api/admin/proxy-groups`, {
       method: "POST",
@@ -1150,6 +1178,9 @@ test("admin proxy group APIs support IPWO credential provider test", async () =>
     assert.equal(tested.body.data.redactedProxyUrl, "socks5://<user>:<pass>@us.ipwo.net:7878");
     assert.equal(tested.body.data.ipwo.params.country, "US");
     assert.match(tested.body.data.ipwo.session, /^[a-f0-9]{12}$/);
+    assert.equal(testedProxyUrls.length, 1);
+    assert.match(testedProxyUrls[0], /^socks5:\/\/light121_custom_zone_US_sid_[a-f0-9]{12}_time_120:light121@us\.ipwo\.net:7878$/);
+    assert.equal(tested.body.data.connectivity.ip, "1.2.3.4");
   } finally {
     await app.closeAll();
   }
