@@ -101,9 +101,10 @@ function cookieDomainForHost(host, allowedHosts) {
 }
 
 function adminSessionCookies(sessionId, host, adminHosts, options = {}) {
-  const cookies = [buildAdminSessionCookie(sessionId, options)];
+  const cookies = [];
   const domain = cookieDomainForHost(host, adminHosts);
-  if (domain) cookies.push(buildAdminSessionCookie(sessionId, { ...options, domain }));
+  if (domain) cookies.push(clearAdminSessionCookie({ domain }));
+  cookies.push(buildAdminSessionCookie(sessionId, options));
   return cookies;
 }
 
@@ -114,6 +115,24 @@ function clearAdminSessionCookies(host, adminHosts) {
   return cookies;
 }
 
+function cookieValues(req, name) {
+  const header = String(req.headers?.cookie ?? "");
+  const values = [];
+  for (const part of header.split(";")) {
+    const index = part.indexOf("=");
+    if (index < 0) continue;
+    const key = part.slice(0, index).trim();
+    if (key !== name) continue;
+    const raw = part.slice(index + 1).trim();
+    try {
+      values.push(decodeURIComponent(raw));
+    } catch {
+      values.push(raw);
+    }
+  }
+  return [...new Set(values.filter(Boolean))];
+}
+
 function adminAuth(req, adminToken, url) {
   if (adminToken && req.headers["x-admin-token"] === adminToken) {
     return { id: 1, username: "admin", method: "token" };
@@ -121,16 +140,18 @@ function adminAuth(req, adminToken, url) {
   if (adminToken && url?.searchParams?.get("token") === adminToken) {
     return { id: 1, username: "admin", method: "token" };
   }
-  const sessionId = parseCookies(req).get(ADMIN_SESSION_COOKIE);
-  const session = req.platformStore?.getAdminSession(sessionId);
-  if (!session) return null;
-  return {
-    id: session.admin_id,
-    username: session.username,
-    method: "session",
-    session_id: session.id,
-    expires_at: session.expires_at,
-  };
+  for (const sessionId of cookieValues(req, ADMIN_SESSION_COOKIE)) {
+    const session = req.platformStore?.getAdminSession(sessionId);
+    if (!session) continue;
+    return {
+      id: session.admin_id,
+      username: session.username,
+      method: "session",
+      session_id: session.id,
+      expires_at: session.expires_at,
+    };
+  }
+  return null;
 }
 
 function requireAdmin(req, res, adminToken, url) {

@@ -239,8 +239,20 @@ test("public host blocks admin routes and admin cookie is scoped to admin host",
     assert.equal(login.response.status, 200);
     const cookie = login.response.headers.get("set-cookie");
     assert.match(cookie, /gpt_auto_pay_admin=/);
+    assert.match(cookie, /Max-Age=0/);
     assert.match(cookie, /Domain=minipekka\.ayuekp\.store/);
     assert.match(cookie, /Secure/);
+
+    const hostOnlyCookie = cookie.match(/gpt_auto_pay_admin=([^;]+); Path=\/; HttpOnly/)?.[1] ?? "";
+    assert.ok(hostOnlyCookie);
+    const me = await jsonFetch(`${app.url}/api/admin/me`, {
+      headers: {
+        "x-forwarded-host": "minipekka.ayuekp.store",
+        cookie: `gpt_auto_pay_admin=stale-domain; gpt_auto_pay_admin=${hostOnlyCookie}`,
+      },
+    });
+    assert.equal(me.response.status, 200);
+    assert.equal(me.body.data.method, "session");
   } finally {
     await app.closeAll();
   }
