@@ -154,6 +154,13 @@ test("admin login creates a session cookie for browser admin APIs", async () => 
     assert.match(adminHtml, /id="selectedCodesExport"/);
     assert.match(adminHtml, /id="paymentCountryOptions"/);
     assert.match(adminHtml, /id="cardSecretDialog"/);
+    assert.match(adminHtml, /id="cardEditForm"/);
+    assert.match(adminHtml, /id="cardEditSaveBtn"/);
+    assert.match(adminHtml, /id="cardFreezeBtn"/);
+    assert.match(adminHtml, /id="cardUnfreezeBtn"/);
+    assert.match(adminHtml, /id="billingEditDialog"/);
+    assert.match(adminHtml, /id="billingEditSaveBtn"/);
+    assert.match(adminHtml, /data-billing-edit/);
     assert.match(adminHtml, /id="autoRefreshState"/);
     assert.match(adminHtml, /id="queueWorkerState"/);
     assert.match(adminHtml, /data-tab="manual"/);
@@ -800,6 +807,32 @@ test("admin card APIs manage groups, encrypted cards, and audit actions", async 
     });
     assert.equal(detail.body.data.number, "4242424242421234");
     assert.equal(detail.body.data.cvc, "123");
+    assert.equal(detail.body.data.note, "");
+
+    const edited = await jsonFetch(`${app.url}/api/admin/cards/${cardId}`, {
+      method: "PATCH",
+      headers: { "x-admin-token": "admin-token" },
+      body: JSON.stringify({
+        card_group_id: groupId,
+        number: "4000000000000002",
+        exp_month: "11",
+        exp_year: "2032",
+        cvc: "999",
+        priority: 7,
+        max_success_count: 22,
+        status: "standby",
+        note: "edited from api",
+      }),
+    });
+    assert.equal(edited.response.status, 200);
+    assert.equal(edited.body.data.masked_number, "4000 **** **** 0002");
+    assert.equal(edited.body.data.status, "standby");
+    const editedDetail = await jsonFetch(`${app.url}/api/admin/cards/${cardId}?secret=1`, {
+      headers: { "x-admin-token": "admin-token" },
+    });
+    assert.equal(editedDetail.body.data.number, "4000000000000002");
+    assert.equal(editedDetail.body.data.cvc, "999");
+    assert.equal(editedDetail.body.data.note, "edited from api");
 
     const disabledCard = await jsonFetch(`${app.url}/api/admin/cards/${cardId}/disable`, {
       method: "POST",
@@ -814,6 +847,64 @@ test("admin card APIs manage groups, encrypted cards, and audit actions", async 
       body: JSON.stringify({}),
     });
     assert.equal(restoredDisabledCard.body.data.status, "enabled");
+
+    const manualProviderApp = await createTestApp({
+      adminToken: "admin-token",
+      fetchImpl: async (url, options) => {
+        const path = new URL(url).pathname;
+        if (path === "/bank_card/suspend" || path === "/bank_card/enable") {
+          return new Response(JSON.stringify({ code: 0, content: { ok: true, path } }), { status: 200 });
+        }
+        if (path === "/bank_card/user_info") {
+          return new Response(JSON.stringify({ code: 0, content: { name: "vcc", balance: "1" } }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ code: 0, content: {} }), { status: 200 });
+      },
+    });
+    try {
+      await jsonFetch(`${manualProviderApp.url}/api/admin/card-providers/vcc/config`, {
+        method: "PUT",
+        headers: { "x-admin-token": "admin-token" },
+        body: JSON.stringify({ user_serial: "user-serial", secret_key: "secret-key" }),
+      });
+      const remoteGroup = await jsonFetch(`${manualProviderApp.url}/api/admin/card-groups`, {
+        method: "POST",
+        headers: { "x-admin-token": "admin-token" },
+        body: JSON.stringify({ name: "remote cards" }),
+      });
+      const remoteCard = await jsonFetch(`${manualProviderApp.url}/api/admin/cards`, {
+        method: "POST",
+        headers: { "x-admin-token": "admin-token" },
+        body: JSON.stringify({
+          card_group_id: remoteGroup.body.data.id,
+          number: "4111111111111111",
+          exp_month: "10",
+          exp_year: "2030",
+          cvc: "321",
+          provider: "vcc",
+          provider_card_id: "remote-1",
+        }),
+      });
+      const remoteCardId = remoteCard.body.data.id;
+      const frozen = await jsonFetch(`${manualProviderApp.url}/api/admin/cards/${remoteCardId}/freeze`, {
+        method: "POST",
+        headers: { "x-admin-token": "admin-token" },
+        body: JSON.stringify({}),
+      });
+      assert.equal(frozen.response.status, 200);
+      assert.equal(frozen.body.data.status, "disabled");
+      assert.equal(frozen.body.provider_result.ok, true);
+
+      const unfrozen = await jsonFetch(`${manualProviderApp.url}/api/admin/cards/${remoteCardId}/unfreeze`, {
+        method: "POST",
+        headers: { "x-admin-token": "admin-token" },
+        body: JSON.stringify({}),
+      });
+      assert.equal(unfrozen.response.status, 200);
+      assert.equal(unfrozen.body.data.status, "enabled");
+    } finally {
+      await manualProviderApp.closeAll();
+    }
 
     const success = await jsonFetch(`${app.url}/api/admin/cards/${cardId}/success`, {
       method: "POST",
@@ -859,7 +950,7 @@ test("admin card APIs manage groups, encrypted cards, and audit actions", async 
     assert.equal(duplicateGroup.body.message, "卡组名称已存在，请换一个名称");
     assert.deepEqual(
       app.store.listAuditLogs().map((row) => row.action),
-      ["card_group_create", "card_create", "card_disable", "card_restore", "card_success", "card_delete", "card_restore", "card_group_delete", "card_group_create"],
+      ["card_group_create", "card_create", "card_update", "card_disable", "card_restore", "card_success", "card_delete", "card_restore", "card_group_delete", "card_group_create"],
     );
   } finally {
     await app.closeAll();
@@ -1380,7 +1471,7 @@ test("admin SSE emits an initial queue snapshot", async () => {
   }
 });
 
-test("public order status endpoint enforces per-IP rate limit", async () => {
+test("public order status endpoint rate limits manual refresh but allows auto polling", async () => {
   const app = await createTestApp();
   try {
     for (let i = 0; i < 5; i += 1) {
@@ -1390,6 +1481,14 @@ test("public order status endpoint enforces per-IP rate limit", async () => {
     const limited = await jsonFetch(`${app.url}/api/public/orders/missing-6`);
     assert.equal(limited.response.status, 429);
     assert.equal(limited.body.code, "RATE_LIMITED");
+
+    for (let i = 0; i < 8; i += 1) {
+      const poll = await jsonFetch(`${app.url}/api/public/orders/missing-poll-${i}?poll=1`, {
+        headers: { "x-auto-poll": "1" },
+      });
+      assert.equal(poll.response.status, 404);
+      assert.equal(poll.body.code, "ORDER_NOT_FOUND");
+    }
   } finally {
     await app.closeAll();
   }

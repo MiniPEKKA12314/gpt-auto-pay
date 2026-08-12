@@ -391,7 +391,7 @@ export function renderPublicUi(options = {}) {
     }
 
     function isPendingStatus(status) {
-      return ["created", "queued", "running"].includes(status);
+      return ["created", "queued", "running", "interrupted_review"].includes(status);
     }
 
     function isTerminalStatus(status) {
@@ -406,7 +406,9 @@ export function renderPublicUi(options = {}) {
         succeeded: "充值成功",
         failed: "充值失败",
         interrupted_review: "异常待核对",
-        cancelled: "已取消"
+        cancelled: "已取消",
+        rate_limited: "刷新过于频繁",
+        query_error: "查询异常"
       };
       return map[status] || status || "未知状态";
     }
@@ -419,31 +421,34 @@ export function renderPublicUi(options = {}) {
 
     function renderStatus(data) {
       const box = $("statusBox");
-      const tone = statusTone(data && data.status);
+      const status = data && data.status;
+      const transient = Boolean(data && data.transient);
+      const tone = statusTone(status);
       box.className = "state " + tone;
       const orderLine = data && data.order_id ? '<div class="mono muted">' + escapeHtml(data.order_id) + '</div>' : "";
       const planLine = data && data.plan_name ? '<div>套餐：' + escapeHtml(data.plan_name) + '</div>' : "";
-      box.innerHTML = '<strong>' + escapeHtml(statusLabel(data && data.status)) + '</strong>' + planLine + '<div>' + escapeHtml((data && data.message) || "") + '</div>' + orderLine;
+      box.innerHTML = '<strong>' + escapeHtml(statusLabel(status)) + '</strong>' + planLine + '<div>' + escapeHtml((data && data.message) || "") + '</div>' + orderLine;
       if (data && data.order_id) {
         $("orderInput").value = data.order_id;
-        if (isPendingStatus(data.status)) {
+        if (!transient && isPendingStatus(status)) {
           localStorage.setItem(LAST_ORDER_KEY, data.order_id);
         }
-        saveDraft({ orderId: data.order_id, lastStatus: data.status });
+        if (transient) saveDraft({ orderId: data.order_id });
+        else saveDraft({ orderId: data.order_id, lastStatus: status });
       }
-      if (data && isTerminalStatus(data.status) && pollTimer) {
+      if (data && !transient && isTerminalStatus(status) && pollTimer) {
         window.clearInterval(pollTimer);
         pollTimer = null;
       }
-      if (data && data.status === "succeeded") {
+      if (data && status === "succeeded") {
         setStep("done");
-      } else if (data && (data.status === "failed" || data.status === "cancelled")) {
+      } else if (data && (status === "failed" || status === "cancelled")) {
         setStep("code");
-      } else if (data && data.status === "queued") {
+      } else if (data && status === "queued") {
         setStep("submit");
-      } else if (data && (data.status === "running" || data.status === "created" || data.status === "interrupted_review")) {
-        setStep(data.status === "created" ? "code" : "wait");
-      } else if (data && data.status) {
+      } else if (data && (status === "running" || status === "created" || status === "interrupted_review" || status === "rate_limited" || status === "query_error")) {
+        setStep(status === "created" ? "code" : "wait");
+      } else if (data && status) {
         setStep("code");
       }
     }
@@ -457,17 +462,34 @@ export function renderPublicUi(options = {}) {
     }
 
     async function requestJson(path, options) {
-      const response = await fetch(path, Object.assign({
+      const baseOptions = options || {};
+      const headers = Object.assign({ "content-type": "application/json" }, baseOptions.headers || {});
+      const response = await fetch(path, Object.assign({}, baseOptions, {
         credentials: "same-origin",
-        headers: { "content-type": "application/json" }
-      }, options || {}));
-      const data = await response.json();
+        headers: headers
+      }));
+      const contentType = response.headers.get("content-type") || "";
+      const data = contentType.includes("application/json") ? await response.json() : { message: await response.text() };
       if (!response.ok) {
         const error = new Error(data.message || response.statusText);
+        error.status = response.status;
         error.data = data;
         throw error;
       }
       return data;
+    }
+
+    function isRateLimitError(error) {
+      return Boolean(error && (error.status === 429 || (error.data && error.data.code === "RATE_LIMITED")));
+    }
+
+    function queryProblemStatus(orderId, message, status) {
+      return {
+        status: status || "query_error",
+        order_id: orderId || "",
+        message: message || "订单查询暂时异常，请稍后刷新。",
+        transient: true
+      };
     }
 
     function setCredentialHint(message, tone) {
@@ -659,7 +681,7 @@ export function renderPublicUi(options = {}) {
       event.preventDefault();
       const code = $("codeInput").value.trim();
       if (!code) {
-        renderStatus({ status: "failed", message: "请输入 CDK 卡密" });
+        renderStatus({ status: "created", message: "请输入 CDK 卡密", transient: true });
         return;
       }
       $("submitBtn").disabled = true;
@@ -681,7 +703,8 @@ export function renderPublicUi(options = {}) {
         saveDraft({ code, orderId: result.data.order_id, lastStatus: result.data.status });
         startPolling(result.data.order_id);
       } catch (error) {
-        renderStatus({ status: "failed", message: (error.data && error.data.message) || error.message });
+        const message = isRateLimitError(error) ? "提交过于频繁，请稍后再试。" : ((error.data && error.data.message) || error.message);
+        renderStatus({ status: "created", message: message, transient: true });
       } finally {
         $("submitBtn").disabled = false;
       }
@@ -689,7 +712,7 @@ export function renderPublicUi(options = {}) {
 
     async function recoverOrder() {
       const code = $("codeInput").value.trim();
-      if (!code) return renderStatus({ status: "failed", message: "请输入 CDK 卡密" });
+      if (!code) return renderStatus({ status: "created", message: "请输入 CDK 卡密", transient: true });
       try {
         const result = await requestJson("/api/public/recover", {
           method: "POST",
@@ -699,20 +722,27 @@ export function renderPublicUi(options = {}) {
         saveDraft({ code, orderId: result.data.order_id, lastStatus: result.data.status });
         startPolling(result.data.order_id);
       } catch (error) {
-        renderStatus({ status: "failed", message: (error.data && error.data.message) || error.message });
+        const message = isRateLimitError(error) ? "查询过于频繁，请稍后再试。" : ((error.data && error.data.message) || error.message);
+        renderStatus({ status: "created", message: message, transient: true });
       }
     }
 
-    async function queryOrder() {
+    async function queryOrder(options = {}) {
       const orderId = $("orderInput").value.trim();
-      if (!orderId) return renderStatus({ status: "failed", message: "请输入订单号" });
+      const autoPoll = options.autoPoll === true;
+      if (!orderId) return renderStatus({ status: "created", message: "请输入订单号", transient: true });
       try {
-        const result = await requestJson("/api/public/orders/" + encodeURIComponent(orderId));
+        const path = "/api/public/orders/" + encodeURIComponent(orderId) + (autoPoll ? "?poll=1" : "");
+        const result = await requestJson(path, autoPoll ? { headers: { "x-auto-poll": "1" } } : undefined);
         renderStatus(result.data);
         saveDraft({ orderId: result.data.order_id, lastStatus: result.data.status });
         return result.data;
       } catch (error) {
-        renderStatus({ status: "failed", message: (error.data && error.data.message) || error.message });
+        if (isRateLimitError(error)) {
+          renderStatus(queryProblemStatus(orderId, "刷新过于频繁，请稍后再试。后台订单没有失败，自动刷新会继续等待结果。", "rate_limited"));
+        } else {
+          renderStatus(queryProblemStatus(orderId, (error.data && error.data.message) || error.message, "query_error"));
+        }
       }
       return null;
     }
@@ -720,9 +750,9 @@ export function renderPublicUi(options = {}) {
     async function refreshCurrentOrder() {
       const draft = loadDraft();
       const orderId = $("orderInput").value.trim() || localStorage.getItem(LAST_ORDER_KEY) || draft.orderId || "";
-      if (!orderId) return renderStatus({ status: "created", message: "暂无订单号，请先提交订单或输入订单号查询" });
+      if (!orderId) return renderStatus({ status: "created", message: "暂无订单号，请先提交订单或输入订单号查询", transient: true });
       $("orderInput").value = orderId;
-      return queryOrder();
+      return queryOrder({ manual: true });
     }
 
     function startPolling(orderId) {
@@ -730,8 +760,8 @@ export function renderPublicUi(options = {}) {
       if (!orderId) return;
       pollTimer = window.setInterval(async function() {
         $("orderInput").value = orderId;
-        const data = await queryOrder();
-        if (data && !["queued", "running", "created"].includes(data.status)) {
+        const data = await queryOrder({ autoPoll: true });
+        if (data && isTerminalStatus(data.status)) {
           window.clearInterval(pollTimer);
           pollTimer = null;
         }
@@ -742,7 +772,7 @@ export function renderPublicUi(options = {}) {
     $("credentialInput").addEventListener("input", scheduleCredentialPreview);
     $("credentialInput").addEventListener("blur", previewCredential);
     $("recoverBtn").addEventListener("click", recoverOrder);
-    $("queryBtn").addEventListener("click", queryOrder);
+    $("queryBtn").addEventListener("click", function() { queryOrder({ manual: true }); });
     $("refreshStatusBtn").addEventListener("click", refreshCurrentOrder);
     $("clearBtn").addEventListener("click", function() {
       $("orderInput").value = "";
@@ -764,7 +794,7 @@ export function renderPublicUi(options = {}) {
     if (draft.credential) $("credentialInput").value = draft.credential;
     if (lastOrder) {
       $("orderInput").value = lastOrder;
-      queryOrder();
+      queryOrder({ autoPoll: true });
       startPolling(lastOrder);
     }
   </script>

@@ -299,6 +299,15 @@ function vccCardTargetSummary(body = {}) {
   };
 }
 
+function vccCardTargetFromStoredCard(card = {}) {
+  return {
+    card_id: card.provider_card_id || "",
+    cardId: card.provider_card_id || "",
+    card_num: card.number || "",
+    cardNum: card.number || "",
+  };
+}
+
 function queueSnapshotWithWorker(store, workerStatusProvider) {
   const queue = store.queueSnapshot();
   if (typeof workerStatusProvider !== "function") return queue;
@@ -446,7 +455,8 @@ export function createPlatformRequestHandler(options = {}) {
 
       const orderMatch = url.pathname.match(/^\/api\/public\/orders\/([^/]+)$/);
       if (req.method === "GET" && orderMatch) {
-        if (!rateLimit(res, limiter, `status:ip:${ip}`, 5, 60_000)) return;
+        const isAutoPoll = url.searchParams.get("poll") === "1" || req.headers["x-auto-poll"] === "1";
+        if (!isAutoPoll && !rateLimit(res, limiter, `status:ip:${ip}`, 5, 60_000)) return;
         const order = store.getOrderByNo(decodeURIComponent(orderMatch[1]));
         if (!order) {
           sendError(res, 404, "ORDER_NOT_FOUND", "订单不存在");
@@ -945,7 +955,7 @@ export function createPlatformRequestHandler(options = {}) {
         return;
       }
 
-      const cardAction = url.pathname.match(/^\/api\/admin\/cards\/(\d+)\/(disable|delete|restore|success)$/);
+      const cardAction = url.pathname.match(/^\/api\/admin\/cards\/(\d+)\/(disable|delete|restore|success|freeze|unfreeze)$/);
       if (req.method === "POST" && cardAction) {
         if (!requireAdmin(req, res, adminToken, url)) return;
         const cardId = Number(cardAction[1]);
@@ -953,18 +963,34 @@ export function createPlatformRequestHandler(options = {}) {
         const before = store.getCardById(cardId, { includeSecret: true });
         const body = await readJson(req);
         let after;
+        let providerResult;
         if (action === "disable") after = store.disableCard(cardId, 1);
         else if (action === "delete") after = store.softDeleteCard(cardId, 1, body.reason ?? "");
         else if (action === "success") after = store.incrementCardSuccessCount(cardId);
-        else after = store.restoreCard(cardId);
+        else if (action === "freeze" || action === "unfreeze") {
+          if (String(before.provider || "") !== "vcc") {
+            sendError(res, 400, "CARD_PROVIDER_UNSUPPORTED", "该卡未绑定支持冻结/解冻的远端卡台");
+            return;
+          }
+          const provider = createVccProviderFromStore(store, fetchImpl);
+          const target = vccCardTargetFromStoredCard(before);
+          providerResult = action === "freeze"
+            ? await provider.suspendCard(target)
+            : await provider.enableCard(target);
+          after = action === "freeze" ? store.disableCard(cardId, 1) : store.enableCard(cardId, 1);
+        } else after = store.restoreCard(cardId);
         adminAudit(store, req, {
           action: `card_${action}`,
           target_type: "card",
           target_id: String(cardId),
           before,
-          after,
+          after: providerResult ? { card: after, provider_result: sanitizeVccOperationPayload(providerResult) } : after,
         });
-        sendJson(res, 200, { ok: true, data: after });
+        sendJson(res, 200, {
+          ok: true,
+          data: after,
+          ...(providerResult ? { provider_result: sanitizeVccOperationPayload(providerResult) } : {}),
+        });
         return;
       }
 

@@ -890,9 +890,44 @@ export function renderAdminUi(options = {}) {
       <div class="secret-row"><span>CVC</span><div id="cardSecretCvc" class="secret-value"></div></div>
       <div class="secret-row"><span>来源</span><div id="cardSecretProvider" class="secret-value"></div></div>
       <div class="secret-row"><span>自动策略</span><div id="cardSecretPolicy" class="secret-value"></div></div>
-      <div class="secret-row"><span>编辑来源</span><div class="secret-value form-grid" style="grid-template-columns: 1fr 1fr; margin: 0"><select id="cardPolicyProvider"><option value="">本地/手动卡</option><option value="vcc">VCC 卡台</option></select><input id="cardPolicyProviderCardId" placeholder="远端卡 ID，可留空用卡号操作"></div></div>
+      <form id="cardEditForm" class="form-grid" style="margin-top:14px">
+        <input id="cardEditId" type="hidden">
+        <div><label>卡组</label><select id="cardEditGroup" name="card_group_id"></select></div>
+        <div><label>状态</label><select id="cardEditStatus" name="status"><option value="enabled">启用</option><option value="standby">备用</option><option value="disabled">禁用</option></select></div>
+        <div class="full"><label>卡号</label><input id="cardEditNumber" name="number" autocomplete="off"></div>
+        <div><label>有效月</label><input id="cardEditExpMonth" name="exp_month" inputmode="numeric"></div>
+        <div><label>有效年</label><input id="cardEditExpYear" name="exp_year" inputmode="numeric"></div>
+        <div><label>CVC</label><input id="cardEditCvc" name="cvc" autocomplete="off"></div>
+        <div><label>优先级</label><input id="cardEditPriority" name="priority" type="number"></div>
+        <div><label>最大成功次数</label><input id="cardEditMaxSuccessCount" name="max_success_count" type="number" min="1"></div>
+        <div class="full"><label>备注</label><input id="cardEditNote" name="note"></div>
+        <div class="full row"><button id="cardEditSaveBtn" type="button" class="primary">保存卡信息</button><button id="cardFreezeBtn" type="button">手动冻结远程卡</button><button id="cardUnfreezeBtn" type="button">手动解冻远程卡</button></div>
+      </form>
+      <div class="secret-row"><span>编辑来源</span><div class="secret-value form-grid" style="grid-template-columns: 1fr 1fr; margin: 0"><select id="cardPolicyProvider"><option value="">本地/手动卡</option><option value="vcc">VCC 卡台</option></select><input id="cardPolicyProviderCardId" placeholder="远程卡 ID，可留空用卡号操作"></div></div>
       <div class="secret-row"><span>编辑策略</span><div class="secret-value check-list"><label><input id="cardPolicyUnfreeze" type="checkbox" style="width:auto;height:auto"> 使用前自动解冻</label><label><input id="cardPolicyFreezeSuccess" type="checkbox" style="width:auto;height:auto"> 成功后自动冻结</label><label><input id="cardPolicyFreezeFailure" type="checkbox" style="width:auto;height:auto"> 失败后自动冻结</label></div></div>
-      <div class="row"><button id="cardPolicySaveBtn" type="button">保存远端策略</button></div>
+      <div class="row"><button id="cardPolicySaveBtn" type="button">保存远程策略</button></div>
+    </div>
+  </dialog>
+  <dialog id="billingEditDialog" class="secret-dialog">
+    <header>
+      <h2>&#32534;&#36753;&#36134;&#21333;&#22320;&#22336;</h2>
+      <form method="dialog"><button type="submit">&#20851;&#38381;</button></form>
+    </header>
+    <div class="body">
+      <form id="billingEditForm" class="form-grid">
+        <input id="billingEditId" name="id" type="hidden">
+        <div><label>&#36134;&#21333;&#32452;</label><select id="billingEditGroup" name="billing_group_id"></select></div>
+        <div><label>&#29366;&#24577;</label><select id="billingEditStatus" name="status"><option value="enabled">&#21551;&#29992;</option><option value="disabled">&#31105;&#29992;</option></select></div>
+        <div><label>&#22995;&#21517;</label><input id="billingEditName" name="name" required></div>
+        <div><label>&#22269;&#23478;</label><input id="billingEditCountry" name="country" list="paymentCountryOptions" required></div>
+        <div><label>&#24030;/&#30465;</label><input id="billingEditState" name="state"></div>
+        <div><label>&#22478;&#24066;</label><input id="billingEditCity" name="city" required></div>
+        <div><label>&#37038;&#32534;</label><input id="billingEditPostalCode" name="postal_code" required></div>
+        <div><label>&#20248;&#20808;&#32423;</label><input id="billingEditPriority" name="priority" type="number"></div>
+        <div class="full"><label>&#22320;&#22336;</label><input id="billingEditLine1" name="line1" required></div>
+        <div class="full"><label>&#22791;&#27880;</label><input id="billingEditNote" name="note"></div>
+        <div class="full row"><button id="billingEditSaveBtn" type="button" class="primary">&#20445;&#23384;&#36134;&#21333;&#22320;&#22336;</button></div>
+      </form>
     </div>
   </dialog>
   <div id="toast" class="toast"></div>
@@ -1641,6 +1676,7 @@ export function renderAdminUi(options = {}) {
       }
       setSelectHtml("manualCardGroup", optionHtml(state.cardGroups, "id", function(row) { return "#" + row.id + " " + row.name; }, "", "请选择卡组"));
       $("billingGroupSelect").innerHTML = optionHtml(state.billingGroups, "id", function(row) { return "#" + row.id + " " + row.name; }, "", "请选择账单组");
+      setSelectHtml("billingEditGroup", optionHtml(state.billingGroups, "id", function(row) { return "#" + row.id + " " + row.name; }, "", "\u8bf7\u9009\u62e9\u8d26\u5355\u7ec4"));
       setSelectHtml("manualBillingGroup", optionHtml(state.billingGroups, "id", function(row) { return "#" + row.id + " " + row.name; }, "", "请选择账单组"));
       const checkoutProxies = state.proxyGroups.filter(function(row) { return row.kind === "checkout" || row.kind === "shared"; });
       const directProxies = state.proxyGroups.filter(function(row) { return row.kind === "direct_card" || row.kind === "shared"; });
@@ -1792,10 +1828,42 @@ export function renderAdminUi(options = {}) {
       }).join("");
       $("cardsBody").innerHTML = state.cards.map(function(card) {
         const statusAction = card.status === "disabled"
-          ? "<button data-card-restore='" + card.id + "'>恢复</button>"
-          : "<button data-card-disable='" + card.id + "'>禁用</button>";
-        return "<tr><td>" + card.id + "</td><td class='mono'>" + h(card.masked_number) + "</td><td>" + h(lookupName(state.cardGroups, card.card_group_id)) + "</td><td class='mono'>" + h(cardProviderLabel(card)) + "</td><td>" + h(cardPolicyLabel(card)) + "</td><td>" + statusPill(card.status) + "</td><td>" + h(card.success_count) + "/" + h(card.max_success_count) + "</td><td class='row'><button data-card-secret='" + card.id + "'>查看</button>" + statusAction + "<button class='danger' data-card-delete='" + card.id + "'>删除</button></td></tr>";
+          ? "<button data-card-restore='" + card.id + "'>本地恢复</button>"
+          : "<button data-card-disable='" + card.id + "'>本地禁用</button>";
+        const remoteAction = card.provider === "vcc"
+          ? "<button data-card-freeze='" + card.id + "'>冻结</button><button data-card-unfreeze='" + card.id + "'>解冻</button>"
+          : "";
+        return "<tr><td>" + card.id + "</td><td class='mono'>" + h(card.masked_number) + "</td><td>" + h(lookupName(state.cardGroups, card.card_group_id)) + "</td><td class='mono'>" + h(cardProviderLabel(card)) + "</td><td>" + h(cardPolicyLabel(card)) + "</td><td>" + statusPill(card.status) + "</td><td>" + h(card.success_count) + "/" + h(card.max_success_count) + "</td><td class='row'><button data-card-edit='" + card.id + "'>查看/编辑</button>" + remoteAction + statusAction + "<button class='danger' data-card-delete='" + card.id + "'>删除</button></td></tr>";
       }).join("");
+    }
+
+    function fillCardSecretDialog(card, cardId) {
+      $("cardSecretOutput").textContent = JSON.stringify(card, null, 2);
+      $("cardSecretNumber").textContent = card.number || "";
+      $("cardSecretExpiry").textContent = (card.exp_month || "") + "/" + (card.exp_year || "");
+      $("cardSecretCvc").textContent = card.cvc || "";
+      $("cardSecretProvider").textContent = cardProviderLabel(card);
+      $("cardSecretPolicy").textContent = cardPolicyLabel(card);
+      $("cardEditId").value = String(card.id || cardId || "");
+      $("cardEditGroup").innerHTML = optionHtml(state.cardGroups, "id", function(group) { return group.name; }, card.card_group_id || 0, "请选择卡组");
+      $("cardEditGroup").value = String(card.card_group_id || 0);
+      $("cardEditStatus").value = String(card.status || "enabled");
+      $("cardEditNumber").value = card.number || "";
+      $("cardEditExpMonth").value = card.exp_month || "";
+      $("cardEditExpYear").value = card.exp_year || "";
+      $("cardEditCvc").value = card.cvc || "";
+      $("cardEditPriority").value = card.priority ?? 100;
+      $("cardEditMaxSuccessCount").value = card.max_success_count ?? 1;
+      $("cardEditNote").value = card.note || "";
+      $("cardPolicyProvider").value = card.provider || "";
+      $("cardPolicyProviderCardId").value = card.provider_card_id || "";
+      $("cardPolicyUnfreeze").checked = Boolean(card.auto_unfreeze_before_use);
+      $("cardPolicyFreezeSuccess").checked = Boolean(card.auto_freeze_after_success);
+      $("cardPolicyFreezeFailure").checked = Boolean(card.auto_freeze_after_failure);
+      $("cardPolicySaveBtn").dataset.cardId = String(card.id || cardId || "");
+      $("cardEditSaveBtn").dataset.cardId = String(card.id || cardId || "");
+      $("cardFreezeBtn").dataset.cardId = String(card.id || cardId || "");
+      $("cardUnfreezeBtn").dataset.cardId = String(card.id || cardId || "");
     }
 
     function renderVccConfig() {
@@ -1815,7 +1883,7 @@ export function renderAdminUi(options = {}) {
         const statusAction = row.status === "disabled"
           ? "<button data-billing-restore='" + row.id + "'>恢复</button>"
           : "<button data-billing-disable='" + row.id + "'>禁用</button>";
-        return "<tr><td>" + row.id + "</td><td>" + h(row.name) + "</td><td>" + h(lookupName(state.billingGroups, row.billing_group_id)) + "</td><td>" + h(row.country + " " + (row.state || "") + " " + row.city) + "</td><td>" + h(row.line1 + " " + row.postal_code) + "</td><td>" + statusPill(row.status) + "</td><td class='row'>" + statusAction + "<button class='danger' data-billing-delete='" + row.id + "'>删除</button></td></tr>";
+        return "<tr><td>" + row.id + "</td><td>" + h(row.name) + "</td><td>" + h(lookupName(state.billingGroups, row.billing_group_id)) + "</td><td>" + h(row.country + " " + (row.state || "") + " " + row.city) + "</td><td>" + h(row.line1 + " " + row.postal_code) + "</td><td>" + statusPill(row.status) + "</td><td class='row'><button data-billing-edit='" + row.id + "'>\u7f16\u8f91</button>" + statusAction + "<button class='danger' data-billing-delete='" + row.id + "'>\u5220\u9664</button></td></tr>";
       }).join("");
     }
 
@@ -2205,6 +2273,54 @@ export function renderAdminUi(options = {}) {
       showToast("账单地址已新增", "ok");
     }
 
+
+    function fillBillingEditDialog(address) {
+      $("billingEditId").value = String(address.id || "");
+      $("billingEditGroup").innerHTML = optionHtml(state.billingGroups, "id", function(group) { return "#" + group.id + " " + group.name; }, address.billing_group_id || 0, "\u8bf7\u9009\u62e9\u8d26\u5355\u7ec4");
+      $("billingEditGroup").value = String(address.billing_group_id || 0);
+      $("billingEditStatus").value = address.status || "enabled";
+      $("billingEditName").value = address.name || "";
+      $("billingEditCountry").value = address.country || "";
+      $("billingEditState").value = address.state || "";
+      $("billingEditCity").value = address.city || "";
+      $("billingEditPostalCode").value = address.postal_code || "";
+      $("billingEditPriority").value = address.priority ?? 100;
+      $("billingEditLine1").value = address.line1 || "";
+      $("billingEditNote").value = address.note || "";
+      $("billingEditSaveBtn").dataset.billingId = String(address.id || "");
+    }
+
+    async function showBillingEdit(addressId) {
+      const id = Number(addressId || 0);
+      let address = state.billingAddresses.find(function(row) { return Number(row.id) === id; });
+      if (!address) {
+        await loadBillingAddresses();
+        address = state.billingAddresses.find(function(row) { return Number(row.id) === id; });
+      }
+      if (!address) throw new Error("\u672a\u627e\u5230\u8fd9\u6761\u8d26\u5355\u5730\u5740");
+      fillBillingEditDialog(address);
+      const dialog = $("billingEditDialog");
+      if (dialog && typeof dialog.showModal === "function") dialog.showModal();
+    }
+
+    async function saveBillingEdit() {
+      const id = Number($("billingEditSaveBtn").dataset.billingId || $("billingEditId").value || 0);
+      if (!id) throw new Error("\u8bf7\u5148\u5728\u8d26\u5355\u5730\u5740\u5217\u8868\u91cc\u70b9\u51fb\u7f16\u8f91");
+      const payload = formData($("billingEditForm"));
+      payload.billing_group_id = numeric(payload.billing_group_id, 0);
+      payload.priority = numeric(payload.priority, 100);
+      if (!payload.billing_group_id) throw new Error("\u8bf7\u9009\u62e9\u8d26\u5355\u7ec4");
+      const result = await api("/api/admin/billing-addresses/" + id, {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      });
+      await Promise.all([loadBillingGroups(), loadBillingAddresses(), loadDashboard()]);
+      populateSelects();
+      renderBilling();
+      fillBillingEditDialog(result.data || {});
+      showToast("\u8d26\u5355\u5730\u5740\u5df2\u4fdd\u5b58", "ok");
+      return result;
+    }
     async function createProxyGroup(event) {
       event.preventDefault();
       const form = event.currentTarget;
@@ -2365,22 +2481,34 @@ export function renderAdminUi(options = {}) {
 
     async function showCardSecret(cardId) {
       const result = await api("/api/admin/cards/" + cardId + "?secret=1");
-      const card = result.data || {};
-      $("cardSecretOutput").textContent = JSON.stringify(card, null, 2);
-      $("cardSecretNumber").textContent = card.number || "";
-      $("cardSecretExpiry").textContent = (card.exp_month || "") + "/" + (card.exp_year || "");
-      $("cardSecretCvc").textContent = card.cvc || "";
-      $("cardSecretProvider").textContent = cardProviderLabel(card);
-      $("cardSecretPolicy").textContent = cardPolicyLabel(card);
-      $("cardPolicyProvider").value = card.provider || "";
-      $("cardPolicyProviderCardId").value = card.provider_card_id || "";
-      $("cardPolicyUnfreeze").checked = Boolean(card.auto_unfreeze_before_use);
-      $("cardPolicyFreezeSuccess").checked = Boolean(card.auto_freeze_after_success);
-      $("cardPolicyFreezeFailure").checked = Boolean(card.auto_freeze_after_failure);
-      $("cardPolicySaveBtn").dataset.cardId = String(card.id || cardId || "");
+      fillCardSecretDialog(result.data || {}, cardId);
       const dialog = $("cardSecretDialog");
       if (dialog && typeof dialog.showModal === "function") dialog.showModal();
-      else window.alert("卡号: " + (card.number || "") + "\\n有效期: " + (card.exp_month || "") + "/" + (card.exp_year || "") + "\\nCVC: " + (card.cvc || ""));
+      else window.alert("卡号: " + ((result.data || {}).number || "") + "\\n有效期: " + ((result.data || {}).exp_month || "") + "/" + ((result.data || {}).exp_year || "") + "\\nCVC: " + ((result.data || {}).cvc || ""));
+    }
+
+    async function saveCardEdit() {
+      const cardId = Number($("cardEditSaveBtn").dataset.cardId || $("cardEditId").value || 0);
+      if (!cardId) throw new Error("请先打开一张卡的详情");
+      const payload = {
+        card_group_id: Number($("cardEditGroup").value || 0),
+        status: $("cardEditStatus").value,
+        number: $("cardEditNumber").value,
+        exp_month: $("cardEditExpMonth").value,
+        exp_year: $("cardEditExpYear").value,
+        cvc: $("cardEditCvc").value,
+        priority: numeric($("cardEditPriority").value, 100),
+        max_success_count: numeric($("cardEditMaxSuccessCount").value, 1),
+        note: $("cardEditNote").value,
+      };
+      if (!payload.card_group_id) throw new Error("请选择卡组");
+      const result = await api("/api/admin/cards/" + cardId, { method: "PATCH", body: JSON.stringify(payload) });
+      await Promise.all([loadCards(), loadCardGroups(), loadDashboard()]);
+      populateSelects();
+      renderCards();
+      fillCardSecretDialog(result.data || {}, cardId);
+      showToast("卡信息已保存", "ok");
+      return result;
     }
 
     async function saveCardPolicy() {
@@ -2401,7 +2529,20 @@ export function renderAdminUi(options = {}) {
       $("cardSecretProvider").textContent = cardProviderLabel(card);
       $("cardSecretPolicy").textContent = cardPolicyLabel(card);
       $("cardSecretOutput").textContent = JSON.stringify(card, null, 2);
-      showToast("远端卡自动策略已保存", "ok");
+      showToast("远程卡自动策略已保存", "ok");
+      return result;
+    }
+
+    async function manualCardRemoteAction(cardId, action) {
+      const id = Number(cardId || 0);
+      if (!id) throw new Error("请先打开一张卡的详情");
+      const result = await api("/api/admin/cards/" + id + "/" + action, { method: "POST", body: "{}" });
+      await Promise.all([loadCards(), loadCardGroups(), loadDashboard()]);
+      populateSelects();
+      renderCards();
+      const detail = await api("/api/admin/cards/" + id + "?secret=1");
+      fillCardSecretDialog(detail.data || {}, id);
+      showToast(action === "freeze" ? "远程卡已冻结" : "远程卡已解冻", "ok");
       return result;
     }
 
@@ -2443,6 +2584,9 @@ export function renderAdminUi(options = {}) {
         if (target.dataset.codeDisable) await runWithFeedback(target, "正在禁用兑换码...", function() { return postSimple("/api/admin/redeem/codes/" + target.dataset.codeDisable + "/disable"); });
         if (target.dataset.codeRestoreStatus) await runWithFeedback(target, "正在恢复兑换码...", function() { return postSimple("/api/admin/redeem/codes/" + target.dataset.codeRestoreStatus + "/restore-status"); });
         if (target.dataset.codeDelete) await runWithFeedback(target, "正在删除兑换码...", function() { return postSimple("/api/admin/redeem/codes/" + target.dataset.codeDelete + "/delete"); });
+        if (target.dataset.cardEdit) await runWithFeedback(target, "正在读取卡详情...", function() { return showCardSecret(target.dataset.cardEdit); });
+        if (target.dataset.cardFreeze) await runWithFeedback(target, "正在冻结远程卡...", function() { return manualCardRemoteAction(target.dataset.cardFreeze, "freeze"); });
+        if (target.dataset.cardUnfreeze) await runWithFeedback(target, "正在解冻远程卡...", function() { return manualCardRemoteAction(target.dataset.cardUnfreeze, "unfreeze"); });
         if (target.dataset.cardSecret) {
           await runWithFeedback(target, "正在读取卡详情...", function() { return showCardSecret(target.dataset.cardSecret); });
         }
@@ -2451,6 +2595,7 @@ export function renderAdminUi(options = {}) {
         if (target.dataset.cardRestore) await runWithFeedback(target, "正在恢复卡...", function() { return postSimple("/api/admin/cards/" + target.dataset.cardRestore + "/restore"); });
         if (target.dataset.cardDelete) await runWithFeedback(target, "正在删除卡...", function() { return postSimple("/api/admin/cards/" + target.dataset.cardDelete + "/delete"); });
         if (target.dataset.billingGroupDelete && confirmGroupDelete("billing")) await runWithFeedback(target, "正在删除账单组...", function() { return postSimple("/api/admin/billing-groups/" + target.dataset.billingGroupDelete + "/delete"); });
+        if (target.dataset.billingEdit) await runWithFeedback(target, "\u6b63\u5728\u8bfb\u53d6\u8d26\u5355\u5730\u5740...", function() { return showBillingEdit(target.dataset.billingEdit); });
         if (target.dataset.billingDisable) await runWithFeedback(target, "正在禁用账单地址...", function() { return postSimple("/api/admin/billing-addresses/" + target.dataset.billingDisable + "/disable"); });
         if (target.dataset.billingRestore) await runWithFeedback(target, "正在恢复账单地址...", function() { return postSimple("/api/admin/billing-addresses/" + target.dataset.billingRestore + "/restore"); });
         if (target.dataset.billingDelete) await runWithFeedback(target, "正在删除账单地址...", function() { return postSimple("/api/admin/billing-addresses/" + target.dataset.billingDelete + "/delete"); });
@@ -2510,6 +2655,9 @@ export function renderAdminUi(options = {}) {
     $("cardGroupForm").addEventListener("submit", function(event) { submitWithFeedback(event, "正在新增卡组...", createCardGroup); });
     $("cardForm").addEventListener("submit", function(event) { submitWithFeedback(event, "正在新增卡...", createCard); });
     clickWithFeedback("cardPolicySaveBtn", "正在保存远端卡自动策略...", saveCardPolicy, "远端卡自动策略已保存");
+    clickWithFeedback("cardEditSaveBtn", "正在保存卡信息...", saveCardEdit, "卡信息已保存");
+    clickWithFeedback("cardFreezeBtn", "正在冻结远程卡...", function() { return manualCardRemoteAction($("cardFreezeBtn").dataset.cardId, "freeze"); }, "远程卡已冻结");
+    clickWithFeedback("cardUnfreezeBtn", "正在解冻远程卡...", function() { return manualCardRemoteAction($("cardUnfreezeBtn").dataset.cardId, "unfreeze"); }, "远程卡已解冻");
     $("vccConfigForm").addEventListener("submit", function(event) { submitWithFeedback(event, "正在保存 VCC 配置...", saveVccConfig); });
     clickWithFeedback("vccTestBtn", "正在测试 VCC 账号...", testVccProvider);
     clickWithFeedback("vccBinsBtn", "正在拉取 VCC BIN...", loadVccBins);
@@ -2530,6 +2678,7 @@ export function renderAdminUi(options = {}) {
     clickWithFeedback("vccConsumeOrdersBtn", "正在查询交易流水...", loadVccConsumeOrders);
     $("billingGroupForm").addEventListener("submit", function(event) { submitWithFeedback(event, "正在新增账单组...", createBillingGroup); });
     $("billingAddressForm").addEventListener("submit", function(event) { submitWithFeedback(event, "正在新增账单地址...", createBillingAddress); });
+    clickWithFeedback("billingEditSaveBtn", "\u6b63\u5728\u4fdd\u5b58\u8d26\u5355\u5730\u5740...", saveBillingEdit, "\u8d26\u5355\u5730\u5740\u5df2\u4fdd\u5b58");
     $("proxyProviderSelect").addEventListener("change", syncProxyProviderFields);
     $("proxyGroupForm").addEventListener("submit", function(event) { submitWithFeedback(event, "正在新增代理组...", createProxyGroup); });
     $("proxyEditProvider").addEventListener("change", syncProxyEditProviderFields);
