@@ -36,6 +36,8 @@ async function createTestApp(options = {}) {
     queueWorkerIntervalMs: options.queueWorkerIntervalMs,
     recoverRunningOnStart: options.recoverRunningOnStart,
     proxyConnectivityTester: options.proxyConnectivityTester,
+    publicHosts: options.publicHosts,
+    adminHosts: options.adminHosts,
   });
   return {
     ...app,
@@ -200,6 +202,45 @@ test("admin login creates a session cookie for browser admin APIs", async () => 
       body: "{}",
     });
     assert.equal(logout.response.status, 200);
+  } finally {
+    await app.closeAll();
+  }
+});
+
+
+
+test("public host blocks admin routes and admin cookie is scoped to admin host", async () => {
+  const app = await createTestApp({
+    adminPassword: "Strong-Test-Password-2026!",
+    publicHosts: "redeem.ayuekp.store",
+    adminHosts: "minipekka.ayuekp.store",
+  });
+  try {
+    const publicAdmin = await fetch(`${app.url}/admin`, {
+      headers: { "x-forwarded-host": "redeem.ayuekp.store" },
+    });
+    assert.equal(publicAdmin.status, 404);
+
+    const publicAdminApi = await jsonFetch(`${app.url}/api/admin/dashboard`, {
+      headers: { "x-forwarded-host": "redeem.ayuekp.store" },
+    });
+    assert.equal(publicAdminApi.response.status, 404);
+
+    const adminUi = await fetch(`${app.url}/admin`, {
+      headers: { "x-forwarded-host": "minipekka.ayuekp.store" },
+    });
+    assert.equal(adminUi.status, 200);
+
+    const login = await jsonFetch(`${app.url}/api/admin/login`, {
+      method: "POST",
+      headers: { "x-forwarded-host": "minipekka.ayuekp.store", "x-forwarded-proto": "https" },
+      body: JSON.stringify({ username: "admin", password: "Strong-Test-Password-2026!" }),
+    });
+    assert.equal(login.response.status, 200);
+    const cookie = login.response.headers.get("set-cookie");
+    assert.match(cookie, /gpt_auto_pay_admin=/);
+    assert.match(cookie, /Domain=minipekka\.ayuekp\.store/);
+    assert.match(cookie, /Secure/);
   } finally {
     await app.closeAll();
   }

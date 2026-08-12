@@ -12,6 +12,8 @@ const adminPassword = process.env.PLATFORM_ADMIN_PASSWORD || "Admin-Change-2026!
 const autoQueueWorker = process.env.PLATFORM_AUTO_WORKER !== "0";
 const queueWorkerIntervalMs = Number(process.env.PLATFORM_QUEUE_INTERVAL_MS || 1000);
 const seedDevCodes = process.env.PLATFORM_SEED_DEV_CODES !== "0";
+const publicHosts = process.env.PLATFORM_PUBLIC_HOSTS || "redeem.ayuekp.store";
+const adminHosts = process.env.PLATFORM_ADMIN_HOSTS || "minipekka.ayuekp.store,127.0.0.1,localhost";
 
 const seedCodes = [
   { plan_type: "go", code: "GO-LOCAL-0001" },
@@ -49,6 +51,8 @@ const app = await listenPlatformServer({
   host,
   port,
   adminToken,
+  publicHosts,
+  adminHosts,
   autoQueueWorker,
   queueWorkerIntervalMs,
   recoverRunningOnStart: true,

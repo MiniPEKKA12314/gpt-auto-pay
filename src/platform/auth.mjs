@@ -64,16 +64,21 @@ export function parseCookies(req) {
 export function buildAdminSessionCookie(sessionId, options = {}) {
   const maxAge = Number(options.maxAgeSeconds ?? 12 * 60 * 60);
   const secure = options.secure ? "; Secure" : "";
+  const domain = String(options.domain ?? "").trim();
+  const domainPart = domain ? `Domain=${domain}` : "";
   return [
     `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(sessionId)}`,
     "Path=/",
+    domainPart,
     "HttpOnly",
     "SameSite=Lax",
     `Max-Age=${Math.max(0, Math.floor(maxAge))}`,
     secure,
-  ].join("; ");
+  ].filter(Boolean).join("; ");
 }
 
-export function clearAdminSessionCookie() {
-  return `${ADMIN_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+export function clearAdminSessionCookie(options = {}) {
+  const domain = String(options.domain ?? "").trim();
+  const domainPart = domain ? `; Domain=${domain}` : "";
+  return `${ADMIN_SESSION_COOKIE}=; Path=/${domainPart}; HttpOnly; SameSite=Lax; Max-Age=0`;
 }

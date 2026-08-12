@@ -62,6 +62,41 @@ function clientIp(req) {
   return req.socket.remoteAddress || "";
 }
 
+function normalizeHostHeader(value) {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return String(raw ?? "").trim().toLowerCase().replace(/:\d+$/, "");
+}
+
+function requestHost(req) {
+  return normalizeHostHeader(req.headers["x-forwarded-host"] || req.headers.host);
+}
+
+function normalizeHostList(values) {
+  if (Array.isArray(values)) return values.map(normalizeHostHeader).filter(Boolean);
+  return String(values ?? "")
+    .split(",")
+    .map(normalizeHostHeader)
+    .filter(Boolean);
+}
+
+function isHostAllowed(host, allowedHosts) {
+  const list = normalizeHostList(allowedHosts);
+  return list.length === 0 || list.includes(normalizeHostHeader(host));
+}
+
+function isAdminPath(pathname) {
+  return pathname === "/admin" || pathname.startsWith("/admin/") || pathname === "/api/admin" || pathname.startsWith("/api/admin/");
+}
+
+function isPublicOnlyBlockedPath(pathname) {
+  return isAdminPath(pathname) || pathname === "/dev" || pathname.startsWith("/dev/");
+}
+
+function cookieDomainForHost(host, allowedHosts) {
+  const normalized = normalizeHostHeader(host);
+  return isHostAllowed(normalized, allowedHosts) ? normalized : "";
+}
+
 function adminAuth(req, adminToken, url) {
   if (adminToken && req.headers["x-admin-token"] === adminToken) {
     return { id: 1, username: "admin", method: "token" };
@@ -253,13 +288,27 @@ export function createPlatformRequestHandler(options = {}) {
   const queueAdapterFactory = options.queueAdapterFactory ?? createPlatformPaymentAdapterFactory({ store, fetchImpl, cardProviderFactory: options.cardProviderFactory });
   const proxyConnectivityTester = options.proxyConnectivityTester ?? testProxyConnectivity;
   const workerStatusProvider = typeof options.workerStatusProvider === "function" ? options.workerStatusProvider : null;
+  const publicHosts = normalizeHostList(options.publicHosts ?? process.env.PLATFORM_PUBLIC_HOSTS ?? "");
+  const adminHosts = normalizeHostList(options.adminHosts ?? process.env.PLATFORM_ADMIN_HOSTS ?? "");
 
   return async function platformRequestHandler(req, res) {
     req.platformStore = store;
     const url = new URL(req.url || "/", "http://127.0.0.1");
     const ip = clientIp(req);
+    const host = requestHost(req);
+    const onPublicHost = publicHosts.includes(host);
+    const onAdminHost = adminHosts.includes(host);
+    const adminHostRestricted = adminHosts.length > 0;
 
     try {
+      if (onPublicHost && isPublicOnlyBlockedPath(url.pathname)) {
+        sendError(res, 404, "NOT_FOUND", "?????");
+        return;
+      }
+      if (adminHostRestricted && isAdminPath(url.pathname) && !onAdminHost) {
+        sendError(res, 404, "NOT_FOUND", "?????");
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/health") {
         sendJson(res, 200, { ok: true });
         return;
@@ -375,6 +424,7 @@ export function createPlatformRequestHandler(options = {}) {
           after: { username: admin.username },
         });
         const secureCookie = String(req.headers["x-forwarded-proto"] || "").toLowerCase() === "https";
+        const adminCookieDomain = cookieDomainForHost(host, adminHosts);
         sendJson(res, 200, {
           ok: true,
           data: {
@@ -382,7 +432,7 @@ export function createPlatformRequestHandler(options = {}) {
             expires_at: session.expires_at,
           },
         }, {
-          "set-cookie": buildAdminSessionCookie(session.id, { maxAgeSeconds: 12 * 60 * 60, secure: secureCookie }),
+          "set-cookie": buildAdminSessionCookie(session.id, { maxAgeSeconds: 12 * 60 * 60, secure: secureCookie, domain: adminCookieDomain }),
         });
         return;
       }
@@ -390,7 +440,7 @@ export function createPlatformRequestHandler(options = {}) {
       if (req.method === "POST" && url.pathname === "/api/admin/logout") {
         const sessionId = parseCookies(req).get(ADMIN_SESSION_COOKIE);
         if (sessionId) store.deleteAdminSession(sessionId);
-        sendJson(res, 200, { ok: true }, { "set-cookie": clearAdminSessionCookie() });
+        sendJson(res, 200, { ok: true }, { "set-cookie": clearAdminSessionCookie({ domain: cookieDomainForHost(host, adminHosts) }) });
         return;
       }
 
