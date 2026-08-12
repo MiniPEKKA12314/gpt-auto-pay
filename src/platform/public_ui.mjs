@@ -159,6 +159,11 @@ export function renderPublicUi(options = {}) {
       border-color: rgba(87, 82, 232, .35);
       background: var(--soft);
     }
+    .step.ok {
+      color: var(--ok);
+      border-color: rgba(18, 128, 92, .32);
+      background: #effaf5;
+    }
     label {
       display: block;
       margin: 14px 0 7px;
@@ -216,6 +221,20 @@ export function renderPublicUi(options = {}) {
     .status {
       display: grid;
       gap: 12px;
+    }
+    .query-title {
+      display: grid;
+      gap: 4px;
+      margin-bottom: 4px;
+    }
+    .query-title strong {
+      font-size: 16px;
+      line-height: 1.2;
+    }
+    .query-title span {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
     }
     .state {
       border: 1px solid var(--line);
@@ -280,8 +299,6 @@ export function renderPublicUi(options = {}) {
       </div>
       <nav aria-label="公开页面导航">
         <a href="/" aria-current="page">充值</a>
-        <a href="/query">查询</a>
-        <a href="/admin">后台</a>
       </nav>
     </header>
 
@@ -316,10 +333,15 @@ export function renderPublicUi(options = {}) {
           <div class="muted">订单状态会显示在这里。</div>
         </div>
         <div>
+          <div class="query-title">
+            <strong>订单查询</strong>
+            <span>可输入订单号查询，也可手动刷新当前订单状态。</span>
+          </div>
           <label for="orderInput">订单号</label>
           <input id="orderInput" class="mono" autocomplete="off">
           <div class="actions">
             <button id="queryBtn" type="button">查询订单</button>
+            <button id="refreshStatusBtn" type="button">刷新状态</button>
             <button id="clearBtn" type="button">清空</button>
           </div>
         </div>
@@ -333,9 +355,19 @@ export function renderPublicUi(options = {}) {
     let pollTimer = null;
 
     function setStep(name) {
+      $("stepWait").textContent = name === "done" ? "3. 完成" : "3. 等待";
       $("stepCode").classList.toggle("active", name === "code");
       $("stepSubmit").classList.toggle("active", name === "submit");
-      $("stepWait").classList.toggle("active", name === "wait");
+      $("stepWait").classList.toggle("active", name === "wait" || name === "done");
+      $("stepWait").classList.toggle("ok", name === "done");
+    }
+
+    function isPendingStatus(status) {
+      return ["created", "queued", "running"].includes(status);
+    }
+
+    function isTerminalStatus(status) {
+      return ["succeeded", "failed", "cancelled"].includes(status);
     }
 
     function statusLabel(status) {
@@ -364,14 +396,29 @@ export function renderPublicUi(options = {}) {
       const orderLine = data && data.order_id ? '<div class="mono muted">' + escapeHtml(data.order_id) + '</div>' : "";
       const planLine = data && data.plan_name ? '<div>套餐：' + escapeHtml(data.plan_name) + '</div>' : "";
       box.innerHTML = '<strong>' + escapeHtml(statusLabel(data && data.status)) + '</strong>' + planLine + '<div>' + escapeHtml((data && data.message) || "") + '</div>' + orderLine;
+      if (data && isTerminalStatus(data.status)) {
+        localStorage.removeItem("gpt_auto_pay_last_order");
+      }
       if (data && data.order_id) {
         $("orderInput").value = data.order_id;
-        localStorage.setItem("gpt_auto_pay_last_order", data.order_id);
+        if (isPendingStatus(data.status)) {
+          localStorage.setItem("gpt_auto_pay_last_order", data.order_id);
+        }
       }
-      if (data && (data.status === "queued" || data.status === "running" || data.status === "created")) {
-        setStep(data.status === "queued" ? "submit" : "wait");
+      if (data && isTerminalStatus(data.status) && pollTimer) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (data && data.status === "succeeded") {
+        setStep("done");
+      } else if (data && (data.status === "failed" || data.status === "cancelled")) {
+        setStep("code");
+      } else if (data && data.status === "queued") {
+        setStep("submit");
+      } else if (data && (data.status === "running" || data.status === "created" || data.status === "interrupted_review")) {
+        setStep(data.status === "created" ? "code" : "wait");
       } else if (data && data.status) {
-        setStep("wait");
+        setStep("code");
       }
     }
 
@@ -641,6 +688,13 @@ export function renderPublicUi(options = {}) {
       return null;
     }
 
+    async function refreshCurrentOrder() {
+      const orderId = $("orderInput").value.trim() || localStorage.getItem("gpt_auto_pay_last_order") || "";
+      if (!orderId) return renderStatus({ status: "created", message: "暂无订单号，请先提交订单或输入订单号查询" });
+      $("orderInput").value = orderId;
+      return queryOrder();
+    }
+
     function startPolling(orderId) {
       if (pollTimer) window.clearInterval(pollTimer);
       if (!orderId) return;
@@ -659,6 +713,7 @@ export function renderPublicUi(options = {}) {
     $("credentialInput").addEventListener("blur", previewCredential);
     $("recoverBtn").addEventListener("click", recoverOrder);
     $("queryBtn").addEventListener("click", queryOrder);
+    $("refreshStatusBtn").addEventListener("click", refreshCurrentOrder);
     $("clearBtn").addEventListener("click", function() {
       $("orderInput").value = "";
       localStorage.removeItem("gpt_auto_pay_last_order");
