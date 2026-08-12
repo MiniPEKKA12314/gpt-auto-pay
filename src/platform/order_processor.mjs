@@ -91,6 +91,7 @@ export async function resolveAttemptProxyAsync(store, plan, field, retry = {}, o
   const selected = await selectProxyForAttemptAsync(proxyGroup, {
     attemptIndex,
     fetchImpl: options.fetchImpl,
+    session: options.session ?? options.session_id ?? options.sessionId,
   });
   return {
     ...selected,
@@ -123,6 +124,7 @@ export class PlatformPaymentAttemptAdapter {
     const runtime = await this.resolveRuntime(context);
     const checkoutInputAlreadyKnown = firstString(runtime.checkoutInput, runtime.checkout_input);
     let checkoutInput = checkoutInputAlreadyKnown;
+    let checkoutProxy = null;
     let checkoutResult = checkoutInput
       ? {
           ok: true,
@@ -135,13 +137,14 @@ export class PlatformPaymentAttemptAdapter {
       : null;
 
     if (!checkoutInput) {
-      const checkoutProxy = await resolveAttemptProxyAsync(this.store, context.plan, "checkout_proxy_group_id", context.retry);
+      checkoutProxy = await resolveAttemptProxyAsync(this.store, context.plan, "checkout_proxy_group_id", context.retry);
       if (checkoutProxy.error) {
         return failedResult(checkoutProxy.error, "CHECKOUT_PROXY_UNAVAILABLE", { phase: "checkout", proxy: checkoutProxy });
       }
       if (context.attemptId) {
         this.store.setOrderAttemptProxies(context.attemptId, {
           checkoutProxy: checkoutProxy.redactedProxyUrl || "",
+          checkoutProxySession: checkoutProxy.session || checkoutProxy.ipwo?.session || checkoutProxy.entry?.session || "",
         });
       }
       emit({
@@ -182,7 +185,20 @@ export class PlatformPaymentAttemptAdapter {
       });
     }
 
-    const directCardProxy = await resolveAttemptProxyAsync(this.store, context.plan, "direct_card_proxy_group_id", context.retry);
+    const reuseCheckoutProxySession = Boolean(
+      checkoutProxy?.session &&
+      checkoutProxy?.group?.kind === "shared" &&
+      Number(context.plan?.checkout_proxy_group_id || 0) > 0 &&
+      Number(context.plan?.checkout_proxy_group_id || 0) === Number(context.plan?.direct_card_proxy_group_id || 0) &&
+      Number(context.retry?.proxy_attempt_index ?? context.retry?.proxyAttemptIndex ?? 0) === 0
+    );
+    const directCardProxy = await resolveAttemptProxyAsync(
+      this.store,
+      context.plan,
+      "direct_card_proxy_group_id",
+      context.retry,
+      reuseCheckoutProxySession ? { session: checkoutProxy.session } : {},
+    );
     if (directCardProxy.error) {
       return failedResult(directCardProxy.error, "DIRECT_CARD_PROXY_UNAVAILABLE", {
         phase: "direct_card",
@@ -193,6 +209,7 @@ export class PlatformPaymentAttemptAdapter {
     if (context.attemptId) {
       this.store.setOrderAttemptProxies(context.attemptId, {
         directCardProxy: directCardProxy.redactedProxyUrl || "",
+        directCardProxySession: directCardProxy.session || directCardProxy.ipwo?.session || directCardProxy.entry?.session || "",
       });
     }
     emit({
@@ -225,6 +242,8 @@ export class PlatformPaymentAttemptAdapter {
       directCardProxy: {
         reason: directCardProxy.reason,
         redactedProxyUrl: directCardProxy.redactedProxyUrl,
+        session: directCardProxy.session || directCardProxy.ipwo?.session || directCardProxy.entry?.session || "",
+        reusedCheckoutSession: reuseCheckoutProxySession,
       },
     };
   }

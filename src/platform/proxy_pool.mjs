@@ -188,6 +188,7 @@ export function selectProxyForAttempt(proxyGroup, options = {}) {
     provider: group.provider,
     kind: group.kind,
     reason: "",
+    session: entry.session || "",
     entry,
   };
 }
@@ -211,6 +212,7 @@ export async function selectProxyForAttemptAsync(proxyGroup, options = {}) {
         provider: group.provider,
         kind: group.kind,
         reason: "",
+        session: built.session,
         entry: {
           url: built.url,
           redacted_url: built.redacted_url,
@@ -267,6 +269,7 @@ export async function selectProxyForAttemptAsync(proxyGroup, options = {}) {
       provider: group.provider,
       kind: group.kind,
       reason: "",
+      session: entry.session || "",
       entry,
       api: {
         provider: "ipwo",

@@ -1522,6 +1522,24 @@ export class PlatformStore {
     `).all(Number(orderId));
   }
 
+  listRecentRunLogs(limit = 80) {
+    const n = toInteger(limit, 80, 1, 500, "limit");
+    return this.db.prepare(`
+      SELECT
+        rl.*,
+        o.order_no,
+        o.plan_type,
+        o.status AS order_status,
+        rc.code_display AS redeem_code
+      FROM run_logs rl
+      LEFT JOIN orders o ON o.id = rl.order_id
+      LEFT JOIN redeem_codes rc ON rc.id = o.redeem_code_id
+      WHERE rl.deleted_at = 0 AND (o.deleted_at = 0 OR o.deleted_at IS NULL)
+      ORDER BY rl.id DESC
+      LIMIT ?
+    `).all(n).reverse();
+  }
+
   getRedeemCodeById(codeId) {
     return getRequired(this.db, "SELECT * FROM redeem_codes WHERE id = ?", Number(codeId));
   }
@@ -1678,6 +1696,30 @@ export class PlatformStore {
       GROUP BY status
     `).all();
     return Object.fromEntries(rows.map((row) => [row.status, row.n]));
+  }
+
+  orderSuccessStats(now = nowSeconds()) {
+    const today = new Date(Number(now) * 1000);
+    today.setHours(0, 0, 0, 0);
+    const todayStart = Math.floor(today.getTime() / 1000);
+    const one = (sql, ...params) => Number(this.db.prepare(sql).get(...params)?.n ?? 0);
+    return {
+      history_success: one(
+        "SELECT COUNT(*) AS n FROM orders WHERE status = ? AND deleted_at = 0",
+        OrderStatus.SUCCEEDED,
+      ),
+      today_success: one(
+        "SELECT COUNT(*) AS n FROM orders WHERE status = ? AND deleted_at = 0 AND finished_at >= ?",
+        OrderStatus.SUCCEEDED,
+        todayStart,
+      ),
+      today_failed: one(
+        "SELECT COUNT(*) AS n FROM orders WHERE status = ? AND deleted_at = 0 AND finished_at >= ?",
+        OrderStatus.FAILED,
+        todayStart,
+      ),
+      today_start: todayStart,
+    };
   }
 
   queueSnapshot() {
@@ -1912,10 +1954,12 @@ export class PlatformStore {
     return {
       queue: this.queueSnapshot(),
       orders: countByStatus("orders"),
+      order_stats: this.orderSuccessStats(),
       redeem_codes: countByStatus("redeem_codes"),
       cards: countByStatus("cards"),
       queued_orders: this.listOrders({ status: OrderStatus.QUEUED, order: "queued", limit: 20 }),
       recent_orders: this.listOrders({ limit: 8 }),
+      recent_logs: this.listRecentRunLogs(80),
     };
   }
 

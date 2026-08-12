@@ -505,6 +505,11 @@ export function renderAdminUi(options = {}) {
             <div class="metric"><span>运行订单</span><b id="metricRunning">0</b></div>
             <div class="metric"><span>未使用兑换码</span><b id="metricUnused">0</b></div>
           </div>
+          <div class="grid-3" style="margin-top:12px">
+            <div class="metric"><span>历史成功订单</span><b id="metricHistorySuccess">0</b></div>
+            <div class="metric"><span>今日成功订单</span><b id="metricTodaySuccess">0</b></div>
+            <div class="metric"><span>今日失败订单</span><b id="metricTodayFailed">0</b></div>
+          </div>
           <section>
             <h2>队列控制</h2>
             <div class="row">
@@ -517,6 +522,10 @@ export function renderAdminUi(options = {}) {
               <button id="processOnceBtn">处理一次</button>
             </div>
             <pre id="queueOutput"></pre>
+          </section>
+          <section>
+            <h2>实时日志</h2>
+            <pre id="liveRunLogsOutput"></pre>
           </section>
           <section>
             <h2>当前排队任务</h2>
@@ -570,7 +579,7 @@ export function renderAdminUi(options = {}) {
               <input id="orderQuery" placeholder="搜索订单号/兑换码" style="width:220px">
               <button id="loadOrdersBtn">查询</button>
             </div>
-            <table><thead><tr><th>订单号</th><th>兑换码</th><th>套餐</th><th>状态</th><th>公开提示</th><th>操作</th></tr></thead><tbody id="ordersBody"></tbody></table>
+            <table><thead><tr><th>订单号</th><th>兑换码</th><th>套餐</th><th>状态</th><th>创建时间</th><th>公开提示</th><th>操作</th></tr></thead><tbody id="ordersBody"></tbody></table>
           </section>
           <section>
             <div class="log-toolbar"><h2>订单详情</h2><button data-copy-order-log="orderDetailOutput">复制详情</button></div>
@@ -1138,6 +1147,24 @@ export function renderAdminUi(options = {}) {
       };
     }
 
+    function formatDashboardRunLogs(logs) {
+      const rows = Array.isArray(logs) ? logs : [];
+      if (!rows.length) return "";
+      const lines = [];
+      rows.forEach(function(log) {
+        const orderNo = log.order_no ? "[" + log.order_no + "] " : "";
+        const stage = log.stage || log.level || "\u65e5\u5fd7";
+        appendLogLine(
+          lines,
+          log.created_at,
+          stage,
+          orderNo + (log.message || "") + compactOrderLogMeta(log.meta_json, stage),
+          log.level,
+        );
+      });
+      return lines.map(renderOrderLogLine).join("\\n");
+    }
+
     function queryString(params) {
       const search = new URLSearchParams();
       Object.entries(params || {}).forEach(function(entry) {
@@ -1606,12 +1633,17 @@ export function renderAdminUi(options = {}) {
       $("metricQueued").textContent = queue.queued || 0;
       $("metricRunning").textContent = queue.running || 0;
       $("metricUnused").textContent = (dashboard.redeem_codes && dashboard.redeem_codes.unused) || 0;
+      const stats = dashboard.order_stats || {};
+      $("metricHistorySuccess").textContent = stats.history_success || 0;
+      $("metricTodaySuccess").textContent = stats.today_success || 0;
+      $("metricTodayFailed").textContent = stats.today_failed || 0;
       $("queueState").textContent = queueStatusLabel(queue.status);
       $("queueState").className = "pill " + (queue.status === "running" ? "ok" : "warn");
       $("queueWorkerState").textContent = workerStatusLabel(queue.worker);
       $("queueWorkerState").className = "pill " + (queue.worker && queue.worker.enabled && queue.worker.started ? "ok" : "warn");
       if (document.activeElement !== $("queueConcurrency")) $("queueConcurrency").value = queue.concurrency || 1;
       $("queueOutput").textContent = queueSummaryText(queue);
+      if ($("liveRunLogsOutput")) $("liveRunLogsOutput").innerHTML = formatDashboardRunLogs(dashboard.recent_logs || []);
       const queuedOrders = Array.isArray(dashboard.queued_orders)
         ? dashboard.queued_orders
         : state.orders.filter(function(order) { return order.status === "queued"; }).slice(0, 20);
@@ -1626,7 +1658,7 @@ export function renderAdminUi(options = {}) {
 
     function renderOrders() {
       $("ordersBody").innerHTML = state.orders.map(function(order) {
-        return "<tr><td class='mono'>" + h(order.order_no) + "</td><td class='mono'>" + h(order.redeem_code || "") + "</td><td>" + h(order.plan_type) + "</td><td>" + statusPill(order.status) + "</td><td>" + h(order.public_message || "") + "</td><td class='row'><button data-order-detail='" + order.id + "'>详情</button><button data-order-requeue='" + order.id + "'>重排</button><button class='danger' data-order-terminate='" + order.id + "'>结束</button><button class='danger' data-order-delete='" + order.id + "' data-order-no='" + h(order.order_no) + "'>删除</button></td></tr>";
+        return "<tr><td class='mono'>" + h(order.order_no) + "</td><td class='mono'>" + h(order.redeem_code || "") + "</td><td>" + h(order.plan_type) + "</td><td>" + statusPill(order.status) + "</td><td>" + h(timeText(order.created_at)) + "</td><td>" + h(order.public_message || "") + "</td><td class='row'><button data-order-detail='" + order.id + "'>详情</button><button data-order-requeue='" + order.id + "'>重排</button><button class='danger' data-order-terminate='" + order.id + "'>结束</button><button class='danger' data-order-delete='" + order.id + "' data-order-no='" + h(order.order_no) + "'>删除</button></td></tr>";
       }).join("");
     }
 

@@ -223,3 +223,120 @@ test("platform payment processor stops before direct card when checkout fails", 
     store.close();
   }
 });
+
+test("shared IPWO credential proxy reuses successful checkout session for first direct-card attempt", async () => {
+  const { store, orderId } = createProcessorStore();
+  try {
+    const sharedGroupId = store.createProxyGroup({
+      name: `shared ipwo ${Math.random()}`,
+      kind: "shared",
+      provider: "ipwo",
+      config: {
+        host: "us.ipwo.net",
+        port: 7878,
+        username: "light121",
+        password: "light121",
+        protocol: "socks5",
+        country: "US",
+        session_mode: "sticky",
+        sticky_minutes: 120,
+      },
+    }, 40);
+    store.upsertPlanConfig({
+      ...store.getPlanConfig("plus"),
+      checkout_proxy_group_id: sharedGroupId,
+      direct_card_proxy_group_id: sharedGroupId,
+      checkout_max_proxy_attempts: 2,
+      max_proxy_attempts_per_card: 2,
+    }, 41);
+
+    const seen = [];
+    const factory = createPlatformPaymentAdapterFactory({
+      checkoutAdapterFactory: () => ({
+        async execute(context) {
+          seen.push({ phase: "checkout", proxy: context.checkoutProxyUrl });
+          if (seen.filter((item) => item.phase === "checkout").length === 1) {
+            return { ok: false, status: "failed", code: "CHECKOUT_FAILED", phase: "checkout", message: "checkout/create ECONNRESET" };
+          }
+          return { ok: true, status: "success", checkoutInput: "oaics_shared_session", checkout_input: "oaics_shared_session" };
+        },
+      }),
+      directCardAdapterFactory: (options) => ({
+        async execute(context) {
+          seen.push({ phase: "direct", proxy: options.proxyUrl, reused: context.directCardProxy?.session });
+          return { status: "success", message: "订阅成功" };
+        },
+      }),
+    });
+
+    const result = await runPlatformOrderWithRetry(store, orderId, factory, { now: () => 100 });
+    assert.equal(result.ok, true);
+    assert.equal(seen.length, 3);
+    assert.notEqual(seen[0].proxy, seen[1].proxy);
+    assert.equal(seen[2].proxy, seen[1].proxy);
+    const attempts = store.listOrderAttempts(orderId);
+    assert.equal(attempts.length, 2);
+    assert.notEqual(attempts[0].checkout_proxy_session, attempts[1].checkout_proxy_session);
+    assert.equal(attempts[1].direct_card_proxy_session, attempts[1].checkout_proxy_session);
+    assert.equal(result.result.directCardProxy.reusedCheckoutSession, true);
+  } finally {
+    store.close();
+  }
+});
+
+test("shared IPWO credential proxy switches direct-card session after direct proxy retry", async () => {
+  const { store, orderId } = createProcessorStore();
+  try {
+    const sharedGroupId = store.createProxyGroup({
+      name: `shared ipwo retry ${Math.random()}`,
+      kind: "shared",
+      provider: "ipwo",
+      config: {
+        host: "us.ipwo.net",
+        port: 7878,
+        username: "light121",
+        password: "light121",
+        protocol: "socks5",
+        country: "US",
+        session_mode: "sticky",
+        sticky_minutes: 120,
+      },
+    }, 50);
+    store.upsertPlanConfig({
+      ...store.getPlanConfig("plus"),
+      checkout_proxy_group_id: sharedGroupId,
+      direct_card_proxy_group_id: sharedGroupId,
+      checkout_max_proxy_attempts: 1,
+      max_proxy_attempts_per_card: 2,
+    }, 51);
+
+    const seen = [];
+    const factory = createPlatformPaymentAdapterFactory({
+      checkoutAdapterFactory: () => ({
+        async execute(context) {
+          seen.push({ phase: "checkout", proxy: context.checkoutProxyUrl });
+          return { ok: true, status: "success", checkoutInput: "oaics_shared_retry", checkout_input: "oaics_shared_retry" };
+        },
+      }),
+      directCardAdapterFactory: (options) => ({
+        async execute(context) {
+          seen.push({ phase: "direct", proxy: options.proxyUrl, retry: context.retry.proxy_attempt_index });
+          if (context.retry.proxy_attempt_index === 0) return { status: "failed", message: "ECONNRESET from proxy" };
+          return { status: "success", message: "订阅成功" };
+        },
+      }),
+    });
+
+    const result = await runPlatformOrderWithRetry(store, orderId, factory, { now: () => 200 });
+    assert.equal(result.ok, true);
+    assert.equal(seen.length, 3);
+    assert.equal(seen[1].proxy, seen[0].proxy);
+    assert.notEqual(seen[2].proxy, seen[0].proxy);
+    const attempts = store.listOrderAttempts(orderId);
+    assert.equal(attempts.length, 2);
+    assert.equal(attempts[0].direct_card_proxy_session, attempts[0].checkout_proxy_session);
+    assert.notEqual(attempts[1].direct_card_proxy_session, attempts[0].checkout_proxy_session);
+  } finally {
+    store.close();
+  }
+});
