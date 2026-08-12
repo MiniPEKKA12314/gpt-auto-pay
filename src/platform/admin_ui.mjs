@@ -350,11 +350,23 @@ export function renderAdminUi(options = {}) {
       white-space: pre-wrap;
       word-break: break-word;
       font: 12px/1.5 var(--mono);
+      user-select: text;
+      -webkit-user-select: text;
     }
+    .log-toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+    .log-toolbar h2 { margin: 0; }
     .order-log-line {
       display: block;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+      user-select: text;
+      -webkit-user-select: text;
     }
     .order-log-marker {
       display: inline-block;
@@ -515,7 +527,7 @@ export function renderAdminUi(options = {}) {
             <table><thead><tr><th>订单号</th><th>兑换码</th><th>套餐</th><th>状态</th><th>创建时间</th><th>错误</th><th>操作</th></tr></thead><tbody id="recentOrdersBody"></tbody></table>
           </section>
           <section>
-            <h2>最近订单详情</h2>
+            <div class="log-toolbar"><h2>最近订单详情</h2><button data-copy-order-log="recentOrderDetailOutput">复制详情</button></div>
             <pre id="recentOrderDetailOutput"></pre>
           </section>
         </div>
@@ -561,7 +573,7 @@ export function renderAdminUi(options = {}) {
             <table><thead><tr><th>订单号</th><th>兑换码</th><th>套餐</th><th>状态</th><th>公开提示</th><th>操作</th></tr></thead><tbody id="ordersBody"></tbody></table>
           </section>
           <section>
-            <h2>订单详情</h2>
+            <div class="log-toolbar"><h2>订单详情</h2><button data-copy-order-log="orderDetailOutput">复制详情</button></div>
             <pre id="orderDetailOutput"></pre>
           </section>
         </div>
@@ -896,7 +908,8 @@ export function renderAdminUi(options = {}) {
       autoRefreshBusy: false,
       openOrderDetailId: 0,
       planFormDirty: false,
-      selectedPlanType: ""
+      selectedPlanType: "",
+      orderDetailPlainText: ""
     };
 
     function h(value) {
@@ -1008,10 +1021,35 @@ export function renderAdminUi(options = {}) {
       try { return JSON.parse(String(value)); } catch { return {}; }
     }
 
-    function compactJson(value) {
+    function compactOrderLogMeta(value, stage) {
       const json = safeJson(value);
       if (!json || Object.keys(json).length === 0) return "";
-      return " " + JSON.stringify(json);
+      const rawStage = String(stage || "");
+      const lowerStage = rawStage.toLowerCase();
+      const isProxyStage = lowerStage.includes("proxy") || /\u4ee3\u7406/.test(rawStage);
+      if (isProxyStage) {
+        const parts = [];
+        if (json.redactedProxyUrl) parts.push("\u4ee3\u7406=" + json.redactedProxyUrl);
+        if (json.provider) parts.push("\u6765\u6e90=" + json.provider);
+        if (json.kind) parts.push("\u7528\u9014=" + (json.kind === "checkout" ? "\u63d0\u94fe" : (json.kind === "direct_card" ? "\u76f4\u5361" : json.kind)));
+        if (json.ipwo && json.ipwo.session) parts.push("session=" + json.ipwo.session);
+        if (json.reason) parts.push("\u539f\u56e0=" + json.reason);
+        if (json.error) parts.push("\u9519\u8bef=" + json.error);
+        return parts.length ? " {" + parts.join("; ") + "}" : "";
+      }
+      const summary = {};
+      ["code", "status", "ok", "action", "category", "message", "error", "reason"].forEach(function(key) {
+        if (json[key] !== undefined && json[key] !== "" && json[key] !== null) summary[key] = json[key];
+      });
+      if (json.retry && json.retry.policy) {
+        summary.retry = {
+          attempt_no: json.retry.attempt_no,
+          checkout_proxy_attempt_index: json.retry.checkout_proxy_attempt_index,
+          proxy_attempt_index: json.retry.proxy_attempt_index,
+          card_attempt_index: json.retry.card_attempt_index
+        };
+      }
+      return Object.keys(summary).length ? " " + JSON.stringify(summary) : "";
     }
 
     function normalizeOrderLogLevel(explicitLevel, stage, message) {
@@ -1019,14 +1057,20 @@ export function renderAdminUi(options = {}) {
       if (["error", "failed", "failure", "fatal", "bad"].includes(level)) return "error";
       if (["success", "succeeded", "ok", "complete", "completed"].includes(level)) return "ok";
       if (["warn", "warning"].includes(level)) return "warn";
-      const text = String(stage || "") + " " + String(message || "");
-      if (/error|failed|fail|failure|fatal|err|exception|declined|not approved|payment was not approved|payment not approved|do not honor|insufficient funds|incorrect cvc|expired card|timeout|timed out|success=false|ok=false|status=[45][0-9][0-9]|状态=[45][0-9][0-9]|no usable sandbox|chrome exited before devtools|invalid http response from proxy tunnel|proxy connect failed|socks5 authentication failed|econnreset|err_ssl_packet_length_too_long|错误|异常|失败|拒绝|被拒|不可用|没有可用|未能|无法|失效|过期/.test(text)) {
+      const rawStage = String(stage || "");
+      const stageText = rawStage.toLowerCase();
+      const messageText = String(message || "");
+      const isProxyStage = stageText.includes("proxy") || /\u4ee3\u7406/.test(rawStage);
+      const actualErrorPattern = /(failed|fail|failure|fatal|error|err|exception|timeout|timed out|econnreset|authentication failed|connect failed|invalid|declined|not approved|payment was not approved|payment not approved|do not honor|insufficient funds|incorrect cvc|expired card|ok=false|success=false|status=[45][0-9][0-9]|\u72b6\u6001[=:]?\s*[45][0-9][0-9]|\u9519\u8bef|\u5f02\u5e38|\u5931\u8d25|\u62d2\u7edd|\u88ab\u62d2|\u4e0d\u53ef\u7528|\u6ca1\u6709\u53ef\u7528|\u672a\u80fd|\u65e0\u6cd5|\u5931\u6548|\u8fc7\u671f)/i;
+      if (isProxyStage && !actualErrorPattern.test(messageText)) return "info";
+      const text = rawStage + " " + messageText;
+      if (actualErrorPattern.test(text) || /no usable sandbox|chrome exited before devtools|invalid http response from proxy tunnel|proxy connect failed|socks5 authentication failed|err_ssl_packet_length_too_long/i.test(text)) {
         return "error";
       }
-      if (/success|succeeded|successful|ok|filled|completed|complete|approved|active|subscribed|status=2[0-9][0-9]|状态=2[0-9][0-9]|成功|完成|已写入|已定位|已点击|已订阅|订阅成功|订阅已生效|付款成功|支付成功|已激活/.test(text)) {
+      if (/success|succeeded|successful|ok|filled|completed|complete|approved|active|subscribed|status=2[0-9][0-9]|\u72b6\u6001[=:]?\s*2[0-9][0-9]|\u6210\u529f|\u5b8c\u6210|\u5df2\u5199\u5165|\u5df2\u5b9a\u4f4d|\u5df2\u70b9\u51fb|\u5df2\u8ba2\u9605|\u8ba2\u9605\u6210\u529f|\u8ba2\u9605\u5df2\u751f\u6548|\u4ed8\u6b3e\u6210\u529f|\u652f\u4ed8\u6210\u529f|\u5df2\u6fc0\u6d3b/i.test(text)) {
         return "ok";
       }
-      if (/warn|warning|retry|pending|queued|running|processing|authentication_required|requires_action|3ds|3d secure|otp|captcha|verification|challenge|waiting|重试|换代理|切换|排队|运行|等待|处理中|验证|人机|诊断|需要额外验证/.test(text)) {
+      if (/warn|warning|retry|pending|queued|running|processing|authentication_required|requires_action|3ds|3d secure|otp|captcha|verification|challenge|waiting|\u91cd\u8bd5|\u6362\u4ee3\u7406|\u5207\u6362|\u6392\u961f|\u8fd0\u884c|\u7b49\u5f85|\u5904\u7406\u4e2d|\u9a8c\u8bc1|\u4eba\u673a|\u8bca\u65ad|\u9700\u8981\u989d\u5916\u9a8c\u8bc1/i.test(text)) {
         return "warn";
       }
       return "info";
@@ -1035,7 +1079,7 @@ export function renderAdminUi(options = {}) {
     function appendLogLine(lines, seconds, stage, message, level) {
       const entry = {
         time: logTime(seconds),
-        stage: stage || "事件",
+        stage: stage || "\u4e8b\u4ef6",
         message: String(message || "")
       };
       entry.level = normalizeOrderLogLevel(level, entry.stage, entry.message);
@@ -1048,42 +1092,50 @@ export function renderAdminUi(options = {}) {
       return '<span class="order-log-line ' + level + '"><span class="order-log-marker">&#9679;</span> <span class="order-log-text">' + h(text) + '</span></span>';
     }
 
+    function orderLogLineText(line) {
+      return "\u25cf [" + line.time + "] [" + line.stage + "] " + line.message;
+    }
+
     function formatOrderProcessLog(data) {
       const order = data.order || {};
       const attempts = Array.isArray(data.attempts) ? data.attempts : [];
       const logs = Array.isArray(data.logs) ? data.logs : [];
       const runtime = data.runtime || {};
       const lines = [];
-      appendLogLine(lines, order.created_at, "订单", "订单号: " + (order.order_no || "") + "; 套餐: " + (order.plan_type || "") + "; 状态: " + (order.status || ""), order.status);
-      if (order.public_message) appendLogLine(lines, order.updated_at || order.created_at, "公开提示", order.public_message);
-      if (order.admin_error) appendLogLine(lines, order.updated_at || order.finished_at || order.created_at, "错误", order.admin_error, "error");
+      appendLogLine(lines, order.created_at, "\u8ba2\u5355", "\u8ba2\u5355\u53f7: " + (order.order_no || "") + "; \u5957\u9910: " + (order.plan_type || "") + "; \u72b6\u6001: " + (order.status || ""), order.status);
+      if (order.public_message) appendLogLine(lines, order.updated_at || order.created_at, "\u516c\u5f00\u63d0\u793a", order.public_message);
+      if (order.admin_error) appendLogLine(lines, order.updated_at || order.finished_at || order.created_at, "\u9519\u8bef", order.admin_error, "error");
       if (runtime) {
         const runtimeBits = [];
-        if (runtime.has_access_token) runtimeBits.push("Access Token 已保存");
-        if (runtime.has_session_token) runtimeBits.push("Session Token 已保存");
+        if (runtime.has_access_token) runtimeBits.push("Access Token \u5df2\u4fdd\u5b58");
+        if (runtime.has_session_token) runtimeBits.push("Session Token \u5df2\u4fdd\u5b58");
         if (runtime.checkout_input) runtimeBits.push("checkout_input=" + runtime.checkout_input);
-        if (runtimeBits.length) appendLogLine(lines, runtime.updated_at || order.updated_at || order.created_at, "运行资料", runtimeBits.join("; "));
+        if (runtimeBits.length) appendLogLine(lines, runtime.updated_at || order.updated_at || order.created_at, "\u8fd0\u884c\u8d44\u6599", runtimeBits.join("; "));
       }
       attempts.forEach(function(attempt) {
-        const title = "尝试 #" + (attempt.attempt_no || attempt.id);
-        appendLogLine(lines, attempt.started_at || attempt.created_at, title, "状态: " + (attempt.status || "") + "; 阶段: " + (attempt.stage || ""), attempt.status);
+        const title = "\u5c1d\u8bd5 #" + (attempt.attempt_no || attempt.id);
+        appendLogLine(lines, attempt.started_at || attempt.created_at, title, "\u72b6\u6001: " + (attempt.status || "") + "; \u9636\u6bb5: " + (attempt.stage || ""), attempt.status);
         if (attempt.checkout_proxy || attempt.direct_card_proxy) {
-          appendLogLine(lines, attempt.started_at || attempt.created_at, "代理", "提链代理: " + (attempt.checkout_proxy || "无") + "; 直卡代理: " + (attempt.direct_card_proxy || "无"));
+          appendLogLine(lines, attempt.started_at || attempt.created_at, "\u4ee3\u7406", "\u63d0\u94fe\u4ee3\u7406: " + (attempt.checkout_proxy || "\u65e0") + "; \u76f4\u5361\u4ee3\u7406: " + (attempt.direct_card_proxy || "\u65e0"), "info");
         }
         if (attempt.error_code || attempt.error_message) {
-          appendLogLine(lines, attempt.finished_at || attempt.started_at, "错误", (attempt.error_code ? attempt.error_code + ": " : "") + (attempt.error_message || ""), "error");
+          appendLogLine(lines, attempt.finished_at || attempt.started_at, "\u9519\u8bef", (attempt.error_code ? attempt.error_code + ": " : "") + (attempt.error_message || ""), "error");
         }
       });
       if (logs.length) {
         logs.forEach(function(log) {
-          appendLogLine(lines, log.created_at, log.stage || log.level || "日志", (log.message || "") + compactJson(log.meta_json), log.level);
+          const stage = log.stage || log.level || "\u65e5\u5fd7";
+          appendLogLine(lines, log.created_at, stage, (log.message || "") + compactOrderLogMeta(log.meta_json, stage), log.level);
         });
       } else {
-        appendLogLine(lines, order.updated_at || order.created_at, "日志", "暂无运行日志");
+        appendLogLine(lines, order.updated_at || order.created_at, "\u65e5\u5fd7", "\u6682\u65e0\u8fd0\u884c\u65e5\u5fd7");
       }
-      if (order.status === "succeeded") appendLogLine(lines, order.finished_at || order.updated_at, "结果", "订阅成功，订单已完成", "success");
-      if (order.status === "failed") appendLogLine(lines, order.finished_at || order.updated_at, "结果", "订单失败" + (order.admin_error ? ": " + order.admin_error : ""), "error");
-      return lines.map(renderOrderLogLine).join("\\n");
+      if (order.status === "succeeded") appendLogLine(lines, order.finished_at || order.updated_at, "\u7ed3\u679c", "\u8ba2\u9605\u6210\u529f\uff0c\u8ba2\u5355\u5df2\u5b8c\u6210", "success");
+      if (order.status === "failed") appendLogLine(lines, order.finished_at || order.updated_at, "\u7ed3\u679c", "\u8ba2\u5355\u5931\u8d25" + (order.admin_error ? ": " + order.admin_error : ""), "error");
+      return {
+        html: lines.map(renderOrderLogLine).join("\\n"),
+        text: lines.map(orderLogLineText).join("\\n")
+      };
     }
 
     function queryString(params) {
@@ -1351,10 +1403,10 @@ export function renderAdminUi(options = {}) {
         await Promise.all(jobs);
 
         renderOverview();
-        if (tab === "overview" && state.openOrderDetailId) await showOrderDetails(state.openOrderDetailId, { quiet: true });
+        if (tab === "overview" && state.openOrderDetailId && !selectionInsideOrderDetail()) await showOrderDetails(state.openOrderDetailId, { quiet: true });
         if (tab === "orders") {
           renderOrders();
-          if (state.openOrderDetailId) await showOrderDetails(state.openOrderDetailId, { quiet: true });
+          if (state.openOrderDetailId && !selectionInsideOrderDetail()) await showOrderDetails(state.openOrderDetailId, { quiet: true });
         } else if (tab === "redeem") {
           renderRedeem();
         } else if (tab === "manual") {
@@ -1706,9 +1758,25 @@ export function renderAdminUi(options = {}) {
       });
     }
 
-    function setOrderDetailText(text) {
-      if ($("orderDetailOutput")) $("orderDetailOutput").innerHTML = text || "";
-      if ($("recentOrderDetailOutput")) $("recentOrderDetailOutput").innerHTML = text || "";
+    function selectionInsideOrderDetail() {
+      const selection = window.getSelection && window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+      const anchor = selection.anchorNode;
+      const focus = selection.focusNode;
+      const orderBox = $("orderDetailOutput");
+      const recentBox = $("recentOrderDetailOutput");
+      return Boolean(
+        (orderBox && (orderBox.contains(anchor) || orderBox.contains(focus))) ||
+        (recentBox && (recentBox.contains(anchor) || recentBox.contains(focus)))
+      );
+    }
+
+    function setOrderDetailText(detail) {
+      const html = typeof detail === "object" && detail ? detail.html : String(detail || "");
+      const text = typeof detail === "object" && detail ? detail.text : String(detail || "");
+      state.orderDetailPlainText = text || "";
+      if ($("orderDetailOutput")) $("orderDetailOutput").innerHTML = html || "";
+      if ($("recentOrderDetailOutput")) $("recentOrderDetailOutput").innerHTML = html || "";
     }
 
     function renderAudits() {
@@ -2160,6 +2228,32 @@ export function renderAdminUi(options = {}) {
       if (!options.quiet) showToast("订单详情已加载", "ok");
     }
 
+    async function copyOrderLog(outputId) {
+      const node = $(outputId);
+      const selection = window.getSelection ? window.getSelection() : null;
+      const selectedText = selection ? String(selection) : "";
+      const selectedInNode = Boolean(
+        selectedText && node && selection && selection.anchorNode &&
+        (node.contains(selection.anchorNode) || (selection.focusNode && node.contains(selection.focusNode)))
+      );
+      const text = selectedInNode ? selectedText : (state.orderDetailPlainText || (node ? node.innerText : ""));
+      if (!text.trim()) throw new Error("\u6682\u65e0\u53ef\u590d\u5236\u7684\u8ba2\u5355\u8be6\u60c5");
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand("copy");
+        textarea.remove();
+      }
+      showToast("\u8ba2\u5355\u8be6\u60c5\u5df2\u590d\u5236", "ok");
+    }
+
     async function showCardSecret(cardId) {
       const result = await api("/api/admin/cards/" + cardId + "?secret=1");
       const card = result.data || {};
@@ -2203,6 +2297,7 @@ export function renderAdminUi(options = {}) {
       try {
         if (target.dataset.tab) setTab(target.dataset.tab);
         if (target.dataset.orderDetail) await runWithFeedback(target, "正在读取订单详情...", function() { return showOrderDetails(target.dataset.orderDetail); });
+        if (target.dataset.copyOrderLog) await runWithFeedback(target, "正在复制订单详情...", function() { return copyOrderLog(target.dataset.copyOrderLog); });
         if (target.dataset.orderRequeue) await runWithFeedback(target, "正在重排订单...", function() { return postSimple("/api/admin/orders/" + target.dataset.orderRequeue + "/requeue"); });
         if (target.dataset.orderTerminate) await runWithFeedback(target, "正在结束订单...", function() { return postSimple("/api/admin/orders/" + target.dataset.orderTerminate + "/terminate"); });
         if (target.dataset.orderDelete && confirmOrderDelete(target.dataset.orderNo)) await runWithFeedback(target, "正在删除订单...", function() { return deleteOrder(target.dataset.orderDelete); });
