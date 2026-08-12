@@ -810,7 +810,7 @@ export function renderAdminUi(options = {}) {
               <form id="proxyGroupForm" class="form-grid">
                 <div><label>名称</label><input name="name" required></div>
                 <div><label>用途</label><select name="kind"><option value="checkout">提链</option><option value="direct_card">直卡</option><option value="shared">共用</option></select></div>
-                <div><label>远端来源</label><select name="provider"><option value="">本地/手动卡</option><option value="vcc">VCC 卡台</option></select></div>
+                <div><label>远端来源</label><select id="proxyProviderSelect" name="provider"><option value="static">&#38745;&#24577;&#20195;&#29702;</option><option value="ipwo">IPWO &#21160;&#24577;&#20195;&#29702;</option><option value="api">API &#20195;&#29702;</option></select></div>
                 <div><label>启用</label><select name="enabled"><option value="1">启用</option><option value="0">关闭</option></select></div>
                 <div class="full proxy-static-field"><label>代理列表</label><textarea name="proxies" placeholder="https://user:pass@example.com:8443&#10;socks5://user:pass@example.com:1080"></textarea></div>
                 <div class="proxy-ipwo-field"><label>IPWO 协议</label><select name="ipwo_protocol"><option value="socks5">SOCKS5</option><option value="http">HTTP/HTTPS</option></select></div>
@@ -838,7 +838,7 @@ export function renderAdminUi(options = {}) {
                 <input id="proxyEditId" name="id" type="hidden">
                 <div><label>名称</label><input id="proxyEditName" name="name" required></div>
                 <div><label>用途</label><select id="proxyEditKind" name="kind"><option value="checkout">提链</option><option value="direct_card">直卡</option><option value="shared">共用</option></select></div>
-                <div><label>远端来源</label><select name="provider"><option value="">本地/手动卡</option><option value="vcc">VCC 卡台</option></select></div>
+                <div><label>远端来源</label><select id="proxyEditProvider" name="provider"><option value="static">&#38745;&#24577;&#20195;&#29702;</option><option value="ipwo">IPWO &#21160;&#24577;&#20195;&#29702;</option><option value="api">API &#20195;&#29702;</option></select></div>
                 <div><label>启用</label><select id="proxyEditEnabled" name="enabled"><option value="1">启用</option><option value="0">关闭</option></select></div>
                 <div class="full proxy-edit-static-field"><label>代理列表</label><textarea id="proxyEditProxies" name="proxies" placeholder="https://user:pass@example.com:8443&#10;socks5://user:pass@example.com:1080"></textarea></div>
                 <div class="proxy-edit-ipwo-field"><label>IPWO 协议</label><select id="proxyEditIpwoProtocol" name="ipwo_protocol"><option value="socks5">SOCKS5</option><option value="http">HTTP/HTTPS</option></select></div>
@@ -902,6 +902,7 @@ export function renderAdminUi(options = {}) {
   <script>
     const $ = (id) => document.getElementById(id);
     const AUTO_REFRESH_MS = 2000;
+    const ADMIN_SESSION_STORAGE_KEY = "gpt_auto_pay_admin_session";
     const state = {
       tab: "overview",
       admin: null,
@@ -959,14 +960,20 @@ export function renderAdminUi(options = {}) {
     }
 
     async function api(path, options) {
-      const response = await fetch(path, Object.assign({
+      const session = loadAdminSession();
+      const headers = Object.assign({ "content-type": "application/json" }, (options && options.headers) || {});
+      if (session && session.session_id) headers["x-admin-session"] = session.session_id;
+      const response = await fetch(path, Object.assign({}, options || {}, {
         credentials: "same-origin",
-        headers: { "content-type": "application/json" }
-      }, options || {}));
+        headers
+      }));
       const contentType = response.headers.get("content-type") || "";
       const body = contentType.includes("application/json") ? await response.json() : await response.text();
       if (!response.ok) {
-        if (response.status === 401) showLogin();
+        if (response.status === 401) {
+          clearAdminSession();
+          showLogin();
+        }
         const error = new Error((body && body.message) || response.statusText);
         error.data = body;
         throw error;
@@ -1324,6 +1331,30 @@ export function renderAdminUi(options = {}) {
       $("appView").hidden = false;
     }
 
+    function loadAdminSession() {
+      try {
+        return JSON.parse(localStorage.getItem(ADMIN_SESSION_STORAGE_KEY) || "{}") || {};
+      } catch {
+        return {};
+      }
+    }
+
+    function saveAdminSession(data) {
+      try {
+        if (!data || !data.session_id) return;
+        localStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify({
+          session_id: data.session_id,
+          username: data.username || "admin",
+          expires_at: data.expires_at || 0,
+          saved_at: Date.now()
+        }));
+      } catch {}
+    }
+
+    function clearAdminSession() {
+      try { localStorage.removeItem(ADMIN_SESSION_STORAGE_KEY); } catch {}
+    }
+
     async function checkMe() {
       try {
         const result = await api("/api/admin/me");
@@ -1355,6 +1386,7 @@ export function renderAdminUi(options = {}) {
           })
         });
         $("loginOutput").textContent = JSON.stringify(result, null, 2);
+        saveAdminSession(result.data);
         await checkMe();
         showToast("登录成功", "ok");
       } catch (error) {
@@ -1367,6 +1399,7 @@ export function renderAdminUi(options = {}) {
     async function logout() {
       stopAutoRefresh();
       try { await api("/api/admin/logout", { method: "POST", body: "{}" }); } catch {}
+      clearAdminSession();
       state.admin = null;
       showLogin();
     }

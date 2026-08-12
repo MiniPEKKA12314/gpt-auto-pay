@@ -3,7 +3,7 @@ import { URL } from "node:url";
 
 import { renderAdminUi } from "./admin_ui.mjs";
 import { createAuditLog } from "./audit.mjs";
-import { ADMIN_SESSION_COOKIE, buildAdminSessionCookie, clearAdminSessionCookie, parseCookies, verifyPassword } from "./auth.mjs";
+import { ADMIN_SESSION_COOKIE, buildAdminSessionCookie, clearAdminSessionCookie, verifyPassword } from "./auth.mjs";
 import { createVccCardProvider } from "./card_provider_vcc.mjs";
 import { renderDevUi } from "./dev_ui.mjs";
 import { PlatformStoreError } from "./db.mjs";
@@ -133,6 +133,24 @@ function cookieValues(req, name) {
   return [...new Set(values.filter(Boolean))];
 }
 
+function headerValues(req, name) {
+  const value = req.headers?.[name.toLowerCase()];
+  const values = Array.isArray(value) ? value : [value];
+  return values.map((item) => String(item ?? "").trim()).filter(Boolean);
+}
+
+function adminSessionCandidates(req) {
+  const values = cookieValues(req, ADMIN_SESSION_COOKIE);
+  for (const value of headerValues(req, "x-admin-session")) {
+    values.push(value);
+  }
+  for (const value of headerValues(req, "authorization")) {
+    const match = value.match(/^Bearer\s+(.+)$/i);
+    if (match) values.push(match[1].trim());
+  }
+  return [...new Set(values.filter(Boolean))];
+}
+
 function adminAuth(req, adminToken, url) {
   if (adminToken && req.headers["x-admin-token"] === adminToken) {
     return { id: 1, username: "admin", method: "token" };
@@ -140,7 +158,7 @@ function adminAuth(req, adminToken, url) {
   if (adminToken && url?.searchParams?.get("token") === adminToken) {
     return { id: 1, username: "admin", method: "token" };
   }
-  for (const sessionId of cookieValues(req, ADMIN_SESSION_COOKIE)) {
+  for (const sessionId of adminSessionCandidates(req)) {
     const session = req.platformStore?.getAdminSession(sessionId);
     if (!session) continue;
     return {
@@ -466,6 +484,7 @@ export function createPlatformRequestHandler(options = {}) {
           ok: true,
           data: {
             username: admin.username,
+            session_id: session.id,
             expires_at: session.expires_at,
           },
         }, {
@@ -475,8 +494,9 @@ export function createPlatformRequestHandler(options = {}) {
       }
 
       if (req.method === "POST" && url.pathname === "/api/admin/logout") {
-        const sessionId = parseCookies(req).get(ADMIN_SESSION_COOKIE);
-        if (sessionId) store.deleteAdminSession(sessionId);
+        for (const sessionId of adminSessionCandidates(req)) {
+          store.deleteAdminSession(sessionId);
+        }
         sendJson(res, 200, { ok: true }, { "set-cookie": clearAdminSessionCookies(host, adminHosts) });
         return;
       }

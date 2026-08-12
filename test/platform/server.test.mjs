@@ -162,8 +162,12 @@ test("admin login creates a session cookie for browser admin APIs", async () => 
     assert.match(adminHtml, /auto_unfreeze_before_use/);
     assert.match(adminHtml, /vccImportAutoFreezeSuccess/);
     assert.match(adminHtml, /id="proxyEditForm"/);
+    assert.match(adminHtml, /id="proxyProviderSelect"/);
+    assert.match(adminHtml, /id="proxyEditProvider"/);
     assert.match(adminHtml, /data-proxy-group-edit/);
     assert.match(adminHtml, /order-log-line/);
+    assert.match(adminHtml, /gpt_auto_pay_admin_session/);
+    assert.match(adminHtml, /x-admin-session/);
     assert.match(adminHtml, /账单组<\/th><th>地区/);
     const adminScript = adminHtml.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "";
     assert.doesNotThrow(() => new Function(adminScript));
@@ -237,6 +241,7 @@ test("public host blocks admin routes and admin cookie is scoped to admin host",
       body: JSON.stringify({ username: "admin", password: "Strong-Test-Password-2026!" }),
     });
     assert.equal(login.response.status, 200);
+    assert.ok(login.body.data.session_id);
     const cookie = login.response.headers.get("set-cookie");
     assert.match(cookie, /gpt_auto_pay_admin=/);
     assert.match(cookie, /Max-Age=0/);
@@ -253,6 +258,15 @@ test("public host blocks admin routes and admin cookie is scoped to admin host",
     });
     assert.equal(me.response.status, 200);
     assert.equal(me.body.data.method, "session");
+
+    const meWithHeader = await jsonFetch(`${app.url}/api/admin/me`, {
+      headers: {
+        "x-forwarded-host": "minipekka.ayuekp.store",
+        "x-admin-session": login.body.data.session_id,
+      },
+    });
+    assert.equal(meWithHeader.response.status, 200);
+    assert.equal(meWithHeader.body.data.username, "admin");
   } finally {
     await app.closeAll();
   }
