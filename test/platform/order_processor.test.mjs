@@ -224,6 +224,103 @@ test("platform payment processor stops before direct card when checkout fails", 
   }
 });
 
+
+test("card lifecycle only runs around direct card execution", async () => {
+  const { store, cardId, orderId } = createProcessorStore();
+  try {
+    store.updateCard(cardId, {
+      provider: "vcc",
+      provider_card_id: "remote-direct-1",
+      auto_unfreeze_before_use: true,
+      auto_freeze_after_success: true,
+      auto_freeze_after_failure: true,
+    }, 60);
+    const actions = [];
+    const factory = createPlatformPaymentAdapterFactory({
+      checkoutAdapterFactory: () => ({
+        async execute() {
+          actions.push("checkout");
+          return { ok: true, status: "success", checkoutInput: "oaics_lifecycle", checkout_input: "oaics_lifecycle" };
+        },
+      }),
+      directCardAdapterFactory: () => ({
+        async execute() {
+          actions.push("direct");
+          return { status: "success", message: "????" };
+        },
+      }),
+    });
+    const cardProviderFactory = () => ({
+      async enableCard(target) {
+        actions.push("enable:" + target.cardId);
+        return { ok: true };
+      },
+      async suspendCard(target) {
+        actions.push("suspend:" + target.cardId);
+        return { ok: true };
+      },
+    });
+
+    const result = await runPlatformOrderWithRetry(store, orderId, factory, { now: () => 300, cardProviderFactory });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(actions, ["checkout", "enable:remote-direct-1", "direct", "suspend:remote-direct-1"]);
+    const stages = store.listRunLogs(orderId).map((log) => log.stage);
+    assert.equal(stages.includes("card_unfreeze"), true);
+    assert.equal(stages.includes("card_freeze"), true);
+  } finally {
+    store.close();
+  }
+});
+
+test("card lifecycle does not run when checkout fails before direct card", async () => {
+  const { store, cardId, orderId } = createProcessorStore();
+  try {
+    store.updateCard(cardId, {
+      provider: "vcc",
+      provider_card_id: "remote-checkout-fail",
+      auto_unfreeze_before_use: true,
+      auto_freeze_after_success: true,
+      auto_freeze_after_failure: true,
+    }, 61);
+    const actions = [];
+    const factory = createPlatformPaymentAdapterFactory({
+      checkoutAdapterFactory: () => ({
+        async execute() {
+          actions.push("checkout");
+          return { ok: false, status: "failed", code: "CHECKOUT_FAILED", phase: "checkout", message: "checkout/create ???? 400" };
+        },
+      }),
+      directCardAdapterFactory: () => ({
+        async execute() {
+          actions.push("direct");
+          return { status: "success" };
+        },
+      }),
+    });
+    const cardProviderFactory = () => ({
+      async enableCard(target) {
+        actions.push("enable:" + target.cardId);
+        return { ok: true };
+      },
+      async suspendCard(target) {
+        actions.push("suspend:" + target.cardId);
+        return { ok: true };
+      },
+    });
+
+    const result = await runPlatformOrderWithRetry(store, orderId, factory, { now: () => 301, cardProviderFactory });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(actions, ["checkout", "checkout", "checkout", "checkout"]);
+    const stages = store.listRunLogs(orderId).map((log) => log.stage);
+    assert.equal(stages.includes("card_unfreeze"), false);
+    assert.equal(stages.includes("card_freeze"), false);
+  } finally {
+    store.close();
+  }
+});
+
 test("shared IPWO credential proxy reuses successful checkout session for first direct-card attempt", async () => {
   const { store, orderId } = createProcessorStore();
   try {

@@ -1,5 +1,6 @@
 import { CheckoutSessionAdapter } from "./checkout_runner_adapter.mjs";
 import { DirectCardRunnerAdapter } from "./direct_card_runner_adapter.mjs";
+import { runCardLifecycleAction } from "./card_lifecycle.mjs";
 import { PlatformStoreError } from "./db.mjs";
 import { selectProxyForAttempt, selectProxyForAttemptAsync } from "./proxy_pool.mjs";
 
@@ -228,14 +229,48 @@ export class PlatformPaymentAttemptAdapter {
       proxyUrl: directCardProxy.proxyUrl,
       proxyChain: directCardProxy.proxyChain,
     });
-    const directResult = await directCardAdapter.execute({
-      ...context,
-      runtime,
-      checkoutInput,
-      checkoutResult,
-      directCardProxy,
-      emit,
-    });
+    let directResult;
+    let directStarted = false;
+    let lifecycleAfterAction = "freeze_failure";
+    try {
+      await runCardLifecycleAction("unfreeze", { ...context, store: this.store, emit });
+      directStarted = true;
+      directResult = await directCardAdapter.execute({
+        ...context,
+        runtime,
+        checkoutInput,
+        checkoutResult,
+        directCardProxy,
+        emit,
+      });
+      lifecycleAfterAction = directResult?.status === "success" || directResult?.ok === true ? "freeze_success" : "freeze_failure";
+    } catch (error) {
+      directResult = failedResult(error.message || "??????", "DIRECT_CARD_EXCEPTION", {
+        phase: "direct_card",
+        error,
+      });
+      lifecycleAfterAction = "freeze_failure";
+    } finally {
+      if (directStarted) {
+        try {
+          await runCardLifecycleAction(lifecycleAfterAction, { ...context, store: this.store, emit });
+        } catch (error) {
+          const message = error.message || "VCC ???????";
+          emit({
+            level: "error",
+            stage: "card_freeze",
+            message,
+            meta: { error: message },
+          });
+          if (directResult?.status === "success" || directResult?.ok === true) {
+            directResult = failedResult("???????????????????????: " + message, "CARD_FREEZE_FAILED", {
+              phase: "direct_card",
+              previous: directResult,
+            });
+          }
+        }
+      }
+    }
     return {
       ...directResult,
       checkout: checkoutResult,
