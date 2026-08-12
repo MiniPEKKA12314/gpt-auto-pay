@@ -318,7 +318,7 @@ export function renderPublicUi(options = {}) {
           <label for="codeInput">CDK 卡密</label>
           <input id="codeInput" name="code" autocomplete="off" placeholder="请输入 CDK">
           <label for="credentialInput">充值授权凭证</label>
-          <textarea id="credentialInput" name="credential" placeholder="粘贴从 chatgpt/api/auth/session 复制的完整 JSON"></textarea>
+          <textarea id="credentialInput" name="credential" placeholder="粘贴从 chatgpt.com/api/auth/session 复制的完整 JSON"></textarea>
           <div id="credentialHint" class="field-hint"></div>
           <div class="actions">
             <button id="submitBtn" class="primary" type="submit">提交订单</button>
@@ -579,14 +579,14 @@ export function renderPublicUi(options = {}) {
       const missing = [];
       if (!out.accessToken) missing.push("Access Token");
       if (!out.sessionToken) missing.push("Session Token");
-      const suffix = parseError ? "；同时没有识别到必要字段，请重新全选复制 session JSON" : "，请粘贴从 chatgpt/api/auth/session 复制的完整 JSON";
+      const suffix = parseError ? "；同时没有识别到必要字段，请重新全选复制 session JSON" : "，请粘贴从 chatgpt.com/api/auth/session 复制的完整 JSON";
       return "没有识别到 " + missing.join(" 和 ") + suffix;
     }
 
     function parseCredential(raw) {
       const text = normalizeCredentialText(raw);
       const out = {};
-      if (!text) throw new Error("请粘贴从 chatgpt/api/auth/session 复制的完整 JSON");
+      if (!text) throw new Error("请粘贴从 chatgpt.com/api/auth/session 复制的完整 JSON");
       let parseError = "";
       const looksJson = text[0] === "{" || text[0] === "[";
       if (looksJson) {

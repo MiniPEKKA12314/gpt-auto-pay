@@ -258,5 +258,7 @@ export function createPlatformPaymentAdapterFactory(options = {}) {
     directCardAdapterOptions: options.directCardAdapterOptions,
     runtimeResolver: options.runtimeResolver,
     context,
+    fetchImpl: options.fetchImpl,
+    cardProviderFactory: options.cardProviderFactory,
   });
 }

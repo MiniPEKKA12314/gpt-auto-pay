@@ -157,6 +157,8 @@ test("admin login creates a session cookie for browser admin APIs", async () => 
     assert.match(adminHtml, /data-tab="manual"/);
     assert.match(adminHtml, /id="manualOrderForm"/);
     assert.match(adminHtml, /id="planCheckoutMaxProxy"/);
+    assert.match(adminHtml, /auto_unfreeze_before_use/);
+    assert.match(adminHtml, /vccImportAutoFreezeSuccess/);
     assert.match(adminHtml, /id="proxyEditForm"/);
     assert.match(adminHtml, /data-proxy-group-edit/);
     assert.match(adminHtml, /order-log-line/);
@@ -709,10 +711,20 @@ test("admin card APIs manage groups, encrypted cards, and audit actions", async 
         cvc: "123",
         priority: 1,
         max_success_count: 10,
+        provider: "vcc",
+        provider_card_id: "remote-server-1",
+        auto_unfreeze_before_use: true,
+        auto_freeze_after_success: true,
+        auto_freeze_after_failure: true,
       }),
     });
     assert.equal(card.response.status, 200);
     assert.equal(card.body.data.masked_number, "4242 **** **** 1234");
+    assert.equal(card.body.data.provider, "vcc");
+    assert.equal(card.body.data.provider_card_id, "remote-server-1");
+    assert.equal(card.body.data.auto_unfreeze_before_use, 1);
+    assert.equal(card.body.data.auto_freeze_after_success, 1);
+    assert.equal(card.body.data.auto_freeze_after_failure, 1);
     assert.equal(Object.hasOwn(card.body.data, "number"), false);
     const cardId = card.body.data.id;
 

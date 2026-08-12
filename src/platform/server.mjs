@@ -249,8 +249,8 @@ export function createPlatformRequestHandler(options = {}) {
   if (!store) throw new Error("store is required");
   const limiter = options.rateLimiter ?? new MemoryRateLimiter();
   const adminToken = options.adminToken ?? "";
-  const queueAdapterFactory = options.queueAdapterFactory ?? createPlatformPaymentAdapterFactory({ store });
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const queueAdapterFactory = options.queueAdapterFactory ?? createPlatformPaymentAdapterFactory({ store, fetchImpl, cardProviderFactory: options.cardProviderFactory });
   const proxyConnectivityTester = options.proxyConnectivityTester ?? testProxyConnectivity;
   const workerStatusProvider = typeof options.workerStatusProvider === "function" ? options.workerStatusProvider : null;
 
@@ -502,7 +502,11 @@ export function createPlatformRequestHandler(options = {}) {
 
       if (req.method === "POST" && url.pathname === "/api/admin/queue/process-once") {
         if (!requireAdmin(req, res, adminToken, url)) return;
-        const result = await runQueueOnce(store, queueAdapterFactory, { ignorePaused: true });
+        const result = await runQueueOnce(store, queueAdapterFactory, {
+          ignorePaused: true,
+          fetchImpl,
+          cardProviderFactory: options.cardProviderFactory,
+        });
         adminAudit(store, req, {
           action: "queue_process_once",
           target_type: "queue",
@@ -1381,7 +1385,7 @@ export function createPlatformRequestHandler(options = {}) {
 
 export function listenPlatformServer(options = {}) {
   const store = options.store;
-  const queueAdapterFactory = options.queueAdapterFactory ?? (store ? createPlatformPaymentAdapterFactory({ store }) : undefined);
+  const queueAdapterFactory = options.queueAdapterFactory ?? (store ? createPlatformPaymentAdapterFactory({ store, fetchImpl: options.fetchImpl, cardProviderFactory: options.cardProviderFactory }) : undefined);
   let queueWorker = null;
   let lastWorkerEvent = null;
   const workerStatusProvider = () => ({
@@ -1407,6 +1411,8 @@ export function listenPlatformServer(options = {}) {
           adapterFactory: queueAdapterFactory,
           intervalMs: options.queueWorkerIntervalMs ?? 1000,
           recoverRunningOnStart: options.recoverRunningOnStart === true,
+          fetchImpl: options.fetchImpl,
+          cardProviderFactory: options.cardProviderFactory,
           logger: (event) => {
             lastWorkerEvent = summarizeWorkerEvent(event);
             if (typeof options.queueWorkerLogger === "function") options.queueWorkerLogger(event);

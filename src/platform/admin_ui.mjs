@@ -677,6 +677,9 @@ export function renderAdminUi(options = {}) {
                 <div><label>CVC</label><input name="cvc" required></div>
                 <div><label>优先级</label><input name="priority" type="number" value="100"></div>
                 <div><label>成功上限</label><input name="max_success_count" type="number" value="1"></div>
+                <div><label>远端来源</label><select name="provider"><option value="">本地/手动卡</option><option value="vcc">VCC 卡台</option></select></div>
+                <div><label>远端卡 ID</label><input name="provider_card_id" placeholder="VCC cardId，可留空用卡号操作"></div>
+                <div class="full"><label>远端卡自动策略</label><div class="check-list"><label><input name="auto_unfreeze_before_use" type="checkbox" value="1"> 使用前自动解冻</label><label><input name="auto_freeze_after_success" type="checkbox" value="1"> 成功后自动冻结</label><label><input name="auto_freeze_after_failure" type="checkbox" value="1"> 失败后自动冻结</label></div></div>
                 <div class="full"><label>备注</label><input name="note"></div>
                 <div class="full row"><button class="primary" type="submit">新增卡</button></div>
               </form>
@@ -703,6 +706,7 @@ export function renderAdminUi(options = {}) {
                 <div><label>查询全部</label><select name="all"><option value="1">全部卡</option><option value="0">仅激活</option></select></div>
                 <div><label>导入卡组</label><select id="vccImportCardGroup" name="card_group_id"></select></div>
                 <div><label>导入成功上限</label><input id="vccImportMaxSuccess" type="number" min="1" max="1000" value="1"></div>
+                <div class="full"><label>导入后远端卡自动策略</label><div class="check-list"><label><input id="vccImportAutoUnfreeze" type="checkbox" value="1" checked> 使用前自动解冻</label><label><input id="vccImportAutoFreezeSuccess" type="checkbox" value="1" checked> 成功后自动冻结</label><label><input id="vccImportAutoFreezeFailure" type="checkbox" value="1" checked> 失败后自动冻结</label></div></div>
                 <div class="full row">
                   <button id="vccBinsBtn" type="button">拉取 BIN</button>
                   <button id="vccRemoteCardsBtn" type="button">查看远端卡</button>
@@ -760,7 +764,7 @@ export function renderAdminUi(options = {}) {
           </section>
           <section>
             <h2>卡列表</h2>
-            <table><thead><tr><th>ID</th><th>卡号</th><th>卡组</th><th>状态</th><th>成功</th><th>操作</th></tr></thead><tbody id="cardsBody"></tbody></table>
+            <table><thead><tr><th>ID</th><th>卡号</th><th>卡组</th><th>来源</th><th>自动策略</th><th>状态</th><th>成功</th><th>操作</th></tr></thead><tbody id="cardsBody"></tbody></table>
             <pre id="cardSecretOutput" hidden></pre>
           </section>
         </div>
@@ -806,7 +810,7 @@ export function renderAdminUi(options = {}) {
               <form id="proxyGroupForm" class="form-grid">
                 <div><label>名称</label><input name="name" required></div>
                 <div><label>用途</label><select name="kind"><option value="checkout">提链</option><option value="direct_card">直卡</option><option value="shared">共用</option></select></div>
-                <div><label>来源</label><select name="provider" id="proxyProviderSelect"><option value="static">静态列表</option><option value="ipwo">IPWO 参数代理</option><option value="api">其他 API（预留）</option></select></div>
+                <div><label>远端来源</label><select name="provider"><option value="">本地/手动卡</option><option value="vcc">VCC 卡台</option></select></div>
                 <div><label>启用</label><select name="enabled"><option value="1">启用</option><option value="0">关闭</option></select></div>
                 <div class="full proxy-static-field"><label>代理列表</label><textarea name="proxies" placeholder="https://user:pass@example.com:8443&#10;socks5://user:pass@example.com:1080"></textarea></div>
                 <div class="proxy-ipwo-field"><label>IPWO 协议</label><select name="ipwo_protocol"><option value="socks5">SOCKS5</option><option value="http">HTTP/HTTPS</option></select></div>
@@ -834,7 +838,7 @@ export function renderAdminUi(options = {}) {
                 <input id="proxyEditId" name="id" type="hidden">
                 <div><label>名称</label><input id="proxyEditName" name="name" required></div>
                 <div><label>用途</label><select id="proxyEditKind" name="kind"><option value="checkout">提链</option><option value="direct_card">直卡</option><option value="shared">共用</option></select></div>
-                <div><label>来源</label><select id="proxyEditProvider" name="provider"><option value="static">静态列表</option><option value="ipwo">IPWO 参数代理</option><option value="api">其他 API（预留）</option></select></div>
+                <div><label>远端来源</label><select name="provider"><option value="">本地/手动卡</option><option value="vcc">VCC 卡台</option></select></div>
                 <div><label>启用</label><select id="proxyEditEnabled" name="enabled"><option value="1">启用</option><option value="0">关闭</option></select></div>
                 <div class="full proxy-edit-static-field"><label>代理列表</label><textarea id="proxyEditProxies" name="proxies" placeholder="https://user:pass@example.com:8443&#10;socks5://user:pass@example.com:1080"></textarea></div>
                 <div class="proxy-edit-ipwo-field"><label>IPWO 协议</label><select id="proxyEditIpwoProtocol" name="ipwo_protocol"><option value="socks5">SOCKS5</option><option value="http">HTTP/HTTPS</option></select></div>
@@ -884,6 +888,11 @@ export function renderAdminUi(options = {}) {
       <div class="secret-row"><span>卡号</span><div id="cardSecretNumber" class="secret-value"></div></div>
       <div class="secret-row"><span>有效期</span><div id="cardSecretExpiry" class="secret-value"></div></div>
       <div class="secret-row"><span>CVC</span><div id="cardSecretCvc" class="secret-value"></div></div>
+      <div class="secret-row"><span>来源</span><div id="cardSecretProvider" class="secret-value"></div></div>
+      <div class="secret-row"><span>自动策略</span><div id="cardSecretPolicy" class="secret-value"></div></div>
+      <div class="secret-row"><span>编辑来源</span><div class="secret-value form-grid" style="grid-template-columns: 1fr 1fr; margin: 0"><select id="cardPolicyProvider"><option value="">本地/手动卡</option><option value="vcc">VCC 卡台</option></select><input id="cardPolicyProviderCardId" placeholder="远端卡 ID，可留空用卡号操作"></div></div>
+      <div class="secret-row"><span>编辑策略</span><div class="secret-value check-list"><label><input id="cardPolicyUnfreeze" type="checkbox" style="width:auto;height:auto"> 使用前自动解冻</label><label><input id="cardPolicyFreezeSuccess" type="checkbox" style="width:auto;height:auto"> 成功后自动冻结</label><label><input id="cardPolicyFreezeFailure" type="checkbox" style="width:auto;height:auto"> 失败后自动冻结</label></div></div>
+      <div class="row"><button id="cardPolicySaveBtn" type="button">保存远端策略</button></div>
     </div>
   </dialog>
   <div id="toast" class="toast"></div>
@@ -954,7 +963,11 @@ export function renderAdminUi(options = {}) {
     }
 
     function formData(form) {
-      return Object.fromEntries(new FormData(form).entries());
+      const data = Object.fromEntries(new FormData(form).entries());
+      form.querySelectorAll('input[type="checkbox"][name]').forEach(function(input) {
+        if (!Object.hasOwn(data, input.name)) data[input.name] = "";
+      });
+      return data;
     }
 
     function numeric(value, fallback) {
@@ -1044,7 +1057,7 @@ export function renderAdminUi(options = {}) {
         if (json.ipwo && json.ipwo.session) parts.push("session=" + json.ipwo.session);
         if (json.reason) parts.push("\u539f\u56e0=" + json.reason);
         if (json.error) parts.push("\u9519\u8bef=" + json.error);
-        return parts.length ? " {" + parts.join("; ") + "}" : "";
+      return parts.length ? parts.join(" / ") : "未开启";
       }
       const summary = {};
       ["code", "status", "ok", "action", "category", "message", "error", "reason"].forEach(function(key) {
@@ -1714,6 +1727,19 @@ export function renderAdminUi(options = {}) {
       syncPlanForm();
     }
 
+    function cardPolicyLabel(card) {
+      const parts = [];
+      if (card.auto_unfreeze_before_use) parts.push("用前解冻");
+      if (card.auto_freeze_after_success) parts.push("成功冻结");
+      if (card.auto_freeze_after_failure) parts.push("失败冻结");
+      return parts.length ? parts.join(" / ") : "未开启";
+    }
+
+    function cardProviderLabel(card) {
+      if (!card.provider) return "本地";
+      return String(card.provider).toUpperCase() + (card.provider_card_id ? " #" + card.provider_card_id : "");
+    }
+
     function renderCards() {
       $("cardGroupsBody").innerHTML = state.cardGroups.map(function(group) {
         const stats = group.stats || {};
@@ -1723,7 +1749,7 @@ export function renderAdminUi(options = {}) {
         const statusAction = card.status === "disabled"
           ? "<button data-card-restore='" + card.id + "'>恢复</button>"
           : "<button data-card-disable='" + card.id + "'>禁用</button>";
-        return "<tr><td>" + card.id + "</td><td class='mono'>" + h(card.masked_number) + "</td><td>" + h(lookupName(state.cardGroups, card.card_group_id)) + "</td><td>" + statusPill(card.status) + "</td><td>" + h(card.success_count) + "/" + h(card.max_success_count) + "</td><td class='row'><button data-card-secret='" + card.id + "'>查看</button>" + statusAction + "<button class='danger' data-card-delete='" + card.id + "'>删除</button></td></tr>";
+        return "<tr><td>" + card.id + "</td><td class='mono'>" + h(card.masked_number) + "</td><td>" + h(lookupName(state.cardGroups, card.card_group_id)) + "</td><td class='mono'>" + h(cardProviderLabel(card)) + "</td><td>" + h(cardPolicyLabel(card)) + "</td><td>" + statusPill(card.status) + "</td><td>" + h(card.success_count) + "/" + h(card.max_success_count) + "</td><td class='row'><button data-card-secret='" + card.id + "'>查看</button>" + statusAction + "<button class='danger' data-card-delete='" + card.id + "'>删除</button></td></tr>";
       }).join("");
     }
 
@@ -1958,6 +1984,9 @@ export function renderAdminUi(options = {}) {
       const payload = formData(form);
       payload.priority = numeric(payload.priority, 100);
       payload.max_success_count = numeric(payload.max_success_count, 1);
+      payload.auto_unfreeze_before_use = Boolean(payload.auto_unfreeze_before_use);
+      payload.auto_freeze_after_success = Boolean(payload.auto_freeze_after_success);
+      payload.auto_freeze_after_failure = Boolean(payload.auto_freeze_after_failure);
       await api("/api/admin/cards", { method: "POST", body: JSON.stringify(payload) });
       form.reset();
       await Promise.all([loadCards(), loadCardGroups(), loadDashboard()]);
@@ -2048,6 +2077,9 @@ export function renderAdminUi(options = {}) {
       const result = await vccAction("/api/admin/card-providers/vcc/import", {
         card_group_id: cardGroupId,
         max_success_count: numeric($("vccImportMaxSuccess").value, 1),
+        auto_unfreeze_before_use: $("vccImportAutoUnfreeze").checked,
+        auto_freeze_after_success: $("vccImportAutoFreezeSuccess").checked,
+        auto_freeze_after_failure: $("vccImportAutoFreezeFailure").checked,
         all: remote.all,
         pageNumber: remote.pageNumber,
         pageSize: remote.pageSize,
@@ -2293,9 +2325,39 @@ export function renderAdminUi(options = {}) {
       $("cardSecretNumber").textContent = card.number || "";
       $("cardSecretExpiry").textContent = (card.exp_month || "") + "/" + (card.exp_year || "");
       $("cardSecretCvc").textContent = card.cvc || "";
+      $("cardSecretProvider").textContent = cardProviderLabel(card);
+      $("cardSecretPolicy").textContent = cardPolicyLabel(card);
+      $("cardPolicyProvider").value = card.provider || "";
+      $("cardPolicyProviderCardId").value = card.provider_card_id || "";
+      $("cardPolicyUnfreeze").checked = Boolean(card.auto_unfreeze_before_use);
+      $("cardPolicyFreezeSuccess").checked = Boolean(card.auto_freeze_after_success);
+      $("cardPolicyFreezeFailure").checked = Boolean(card.auto_freeze_after_failure);
+      $("cardPolicySaveBtn").dataset.cardId = String(card.id || cardId || "");
       const dialog = $("cardSecretDialog");
       if (dialog && typeof dialog.showModal === "function") dialog.showModal();
       else window.alert("卡号: " + (card.number || "") + "\\n有效期: " + (card.exp_month || "") + "/" + (card.exp_year || "") + "\\nCVC: " + (card.cvc || ""));
+    }
+
+    async function saveCardPolicy() {
+      const cardId = Number($("cardPolicySaveBtn").dataset.cardId || 0);
+      if (!cardId) throw new Error("请先打开一张卡的详情");
+      const payload = {
+        provider: $("cardPolicyProvider").value,
+        provider_card_id: $("cardPolicyProviderCardId").value,
+        auto_unfreeze_before_use: $("cardPolicyUnfreeze").checked,
+        auto_freeze_after_success: $("cardPolicyFreezeSuccess").checked,
+        auto_freeze_after_failure: $("cardPolicyFreezeFailure").checked
+      };
+      const result = await api("/api/admin/cards/" + cardId, { method: "PATCH", body: JSON.stringify(payload) });
+      await Promise.all([loadCards(), loadCardGroups(), loadDashboard()]);
+      populateSelects();
+      renderCards();
+      const card = result.data || {};
+      $("cardSecretProvider").textContent = cardProviderLabel(card);
+      $("cardSecretPolicy").textContent = cardPolicyLabel(card);
+      $("cardSecretOutput").textContent = JSON.stringify(card, null, 2);
+      showToast("远端卡自动策略已保存", "ok");
+      return result;
     }
 
     async function postSimple(path) {
@@ -2402,6 +2464,7 @@ export function renderAdminUi(options = {}) {
     clickWithFeedback("checkReadinessBtn", "正在检查运行条件...", checkReadiness, "运行条件检查完成");
     $("cardGroupForm").addEventListener("submit", function(event) { submitWithFeedback(event, "正在新增卡组...", createCardGroup); });
     $("cardForm").addEventListener("submit", function(event) { submitWithFeedback(event, "正在新增卡...", createCard); });
+    clickWithFeedback("cardPolicySaveBtn", "正在保存远端卡自动策略...", saveCardPolicy, "远端卡自动策略已保存");
     $("vccConfigForm").addEventListener("submit", function(event) { submitWithFeedback(event, "正在保存 VCC 配置...", saveVccConfig); });
     clickWithFeedback("vccTestBtn", "正在测试 VCC 账号...", testVccProvider);
     clickWithFeedback("vccBinsBtn", "正在拉取 VCC BIN...", loadVccBins);

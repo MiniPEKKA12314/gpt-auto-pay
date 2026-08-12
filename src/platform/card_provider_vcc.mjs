@@ -79,9 +79,11 @@ function normalizeExpiryDate(value) {
 export function normalizeVccCard(row = {}) {
   const number = String(row.number ?? row.cardNumber ?? "").replace(/\s+/g, "");
   const expiry = normalizeExpiryDate(row.expiryDate ?? row.expiry_date ?? row.expiry);
+  const providerCardId = String(row.id ?? row.userBankCardId ?? row.cardId ?? row.bankCardId ?? "");
   return {
     provider: "vcc",
-    provider_card_id: String(row.id ?? row.userBankCardId ?? ""),
+    provider_card_id: providerCardId,
+    providerCardId,
     organization: String(row.organization ?? ""),
     state: String(row.state ?? ""),
     number,

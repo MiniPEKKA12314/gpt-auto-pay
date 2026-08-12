@@ -328,3 +328,88 @@ test("retried runner switches cards for declined payments when plan allows it", 
     store.close();
   }
 });
+
+
+test("runner adapter unfreezes VCC cards before use and freezes after success", async () => {
+  const { store, cardId, orderId } = createReadyOrder();
+  try {
+    store.updateCard(cardId, {
+      provider: "vcc",
+      provider_card_id: "remote-success-1",
+      auto_unfreeze_before_use: true,
+      auto_freeze_after_success: true,
+      auto_freeze_after_failure: true,
+    }, 90);
+    const actions = [];
+    const cardProviderFactory = () => ({
+      async enableCard(target) {
+        actions.push(["enable", target.cardId, target.cardNum]);
+        return { ok: true, action: "enable" };
+      },
+      async suspendCard(target) {
+        actions.push(["suspend", target.cardId, target.cardNum]);
+        return { ok: true, action: "suspend" };
+      },
+    });
+    const adapter = createFunctionRunnerAdapter(async () => ({ status: "success", message: "done" }));
+
+    const result = await runPlatformOrder(store, orderId, adapter, { now: () => 700, cardProviderFactory });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(actions.map((item) => item[0]), ["enable", "suspend"]);
+    assert.equal(actions[0][1], "remote-success-1");
+    assert.equal(actions[0][2], "4242424242421234");
+    const logs = store.listRunLogs(orderId).map((log) => log.stage);
+    assert.equal(logs.includes("card_unfreeze"), true);
+    assert.equal(logs.includes("card_freeze"), true);
+  } finally {
+    store.close();
+  }
+});
+
+test("retried runner freezes failed VCC card before switching to next card", async () => {
+  const { store, cardIds, orderId } = createRetryReadyOrder({
+    cardCount: 2,
+    plan: { allow_card_switch: true, max_card_switches: 1, max_proxy_attempts_per_card: 1 },
+  });
+  try {
+    for (const [index, cardId] of cardIds.entries()) {
+      store.updateCard(cardId, {
+        provider: "vcc",
+        provider_card_id: `remote-${index + 1}`,
+        auto_unfreeze_before_use: true,
+        auto_freeze_after_success: true,
+        auto_freeze_after_failure: true,
+      }, 800 + index);
+    }
+    const actions = [];
+    const cardProviderFactory = () => ({
+      async enableCard(target) {
+        actions.push(["enable", target.cardId]);
+        return { ok: true };
+      },
+      async suspendCard(target) {
+        actions.push(["suspend", target.cardId]);
+        return { ok: true };
+      },
+    });
+    const result = await runPlatformOrderWithRetry(store, orderId, async () => ({
+      async execute({ card }) {
+        if (card.id === cardIds[0]) return { status: "failed", message: "Payment was not approved" };
+        return { status: "success", message: "second ok" };
+      },
+    }), { now: () => 900, cardProviderFactory });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(actions, [
+      ["enable", "remote-1"],
+      ["suspend", "remote-1"],
+      ["enable", "remote-2"],
+      ["suspend", "remote-2"],
+    ]);
+    assert.equal(store.getCardById(cardIds[0]).success_count, 0);
+    assert.equal(store.getCardById(cardIds[1]).success_count, 1);
+  } finally {
+    store.close();
+  }
+});

@@ -143,6 +143,11 @@ test("store manages encrypted cards and masked card lists", () => withStore((sto
     cvc: "123",
     priority: 5,
     max_success_count: 10,
+    provider: "vcc",
+    provider_card_id: "remote-card-1",
+    auto_unfreeze_before_use: true,
+    auto_freeze_after_success: true,
+    auto_freeze_after_failure: true,
     note: "first card",
   }, 61);
 
@@ -156,6 +161,15 @@ test("store manages encrypted cards and masked card lists", () => withStore((sto
   assert.equal(detail.exp_month, "12");
   assert.equal(detail.exp_year, "2030");
   assert.equal(detail.cvc, "123");
+  assert.equal(detail.provider, "vcc");
+  assert.equal(detail.provider_card_id, "remote-card-1");
+  assert.equal(detail.auto_unfreeze_before_use, 1);
+  assert.equal(detail.auto_freeze_after_success, 1);
+  assert.equal(detail.auto_freeze_after_failure, 1);
+
+  const updatedPolicy = store.updateCard(cardId, { auto_freeze_after_failure: false, provider_card_id: "remote-card-2" });
+  assert.equal(updatedPolicy.provider_card_id, "remote-card-2");
+  assert.equal(updatedPolicy.auto_freeze_after_failure, 0);
 
   assert.equal(store.incrementCardSuccessCount(cardId, 62).success_count, 1);
   assert.equal(store.disableCard(cardId).status, "disabled");

@@ -1,3 +1,4 @@
+import { runCardLifecycleAction } from "./card_lifecycle.mjs";
 import { OrderStatus } from "./constants.mjs";
 import { decideNextCheckoutRetry, decideNextRetry, isCheckoutPhaseResult, normalizeRetryPolicy } from "./retry_policy.mjs";
 import { selectBillingAddress, selectCard } from "./selection.mjs";
@@ -131,7 +132,9 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
   emit({ level: "info", stage: "runner", message: "runner 开始执行" });
 
   let runnerResult;
+  let lifecycleAfterAction = "freeze_failure";
   try {
+    await runCardLifecycleAction("unfreeze", { store, order, attemptId, card: secretCard, emit, now, ...options });
     runnerResult = await adapter.execute({
       order,
       plan,
@@ -142,8 +145,27 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
       emit,
       signal: options.signal,
     });
+    lifecycleAfterAction = isSuccessResult(runnerResult) ? "freeze_success" : "freeze_failure";
   } catch (error) {
     runnerResult = resultFailed(error.message || "runner exception", { error });
+    lifecycleAfterAction = "freeze_failure";
+  } finally {
+    try {
+      await runCardLifecycleAction(lifecycleAfterAction, { store, order, attemptId, card: secretCard, emit, now, ...options });
+    } catch (error) {
+      const message = error.message || "VCC ???????";
+      store.addRunLog({
+        order_id: order.id,
+        attempt_id: attemptId,
+        level: "error",
+        stage: "card_freeze",
+        message,
+        meta: { error: message },
+      }, now());
+      if (isSuccessResult(runnerResult)) {
+        runnerResult = resultFailed("???????????????????????: " + message, { code: "CARD_FREEZE_FAILED", previous: runnerResult });
+      }
+    }
   }
 
   if (isSuccessResult(runnerResult)) {
@@ -337,7 +359,9 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     });
 
     let runnerResult;
+    let lifecycleAfterAction = "freeze_failure";
     try {
+      await runCardLifecycleAction("unfreeze", { store, order, attemptId, card: secretCard, emit, now, ...options });
       const adapter = ensureAdapter(await adapterFactory({
         store,
         order,
@@ -360,11 +384,30 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
         emit,
         signal: options.signal,
       });
+      lifecycleAfterAction = isSuccessResult(runnerResult) ? "freeze_success" : "freeze_failure";
     } catch (error) {
       runnerResult = resultFailed(error.message || "runner exception", {
         code: "RUNNER_EXCEPTION",
         error,
       });
+      lifecycleAfterAction = "freeze_failure";
+    } finally {
+      try {
+        await runCardLifecycleAction(lifecycleAfterAction, { store, order, attemptId, card: secretCard, emit, now, ...options });
+      } catch (error) {
+        const message = error.message || "VCC ???????";
+        store.addRunLog({
+          order_id: order.id,
+          attempt_id: attemptId,
+          level: "error",
+          stage: "card_freeze",
+          message,
+          meta: { error: message },
+        }, now());
+        if (isSuccessResult(runnerResult)) {
+          runnerResult = resultFailed("???????????????????????: " + message, { code: "CARD_FREEZE_FAILED", previous: runnerResult });
+        }
+      }
     }
 
     if (isSuccessResult(runnerResult)) {

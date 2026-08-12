@@ -43,6 +43,11 @@ function ensureColumn(db, table, column, definition) {
 
 function ensurePlatformMigrations(db) {
   ensureColumn(db, "plan_configs", "checkout_max_proxy_attempts", "INTEGER NOT NULL DEFAULT 4");
+  ensureColumn(db, "cards", "provider", "TEXT DEFAULT ''");
+  ensureColumn(db, "cards", "provider_card_id", "TEXT DEFAULT ''");
+  ensureColumn(db, "cards", "auto_unfreeze_before_use", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "cards", "auto_freeze_after_success", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "cards", "auto_freeze_after_failure", "INTEGER NOT NULL DEFAULT 0");
 }
 
 function ensureDefaultAdmin(db, now = nowSeconds()) {
@@ -64,6 +69,11 @@ function requiredText(value, field) {
 }
 
 function boolInt(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return ["1", "true", "yes", "on", "enabled"].includes(normalized) ? 1 : 0;
+  }
   return value ? 1 : 0;
 }
 
@@ -504,8 +514,9 @@ export class PlatformStore {
       INSERT INTO cards(
         card_group_id, encrypted_number, encrypted_exp_month, encrypted_exp_year,
         encrypted_cvc, masked_number, priority, max_success_count, success_count,
-        status, note, last_used_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        provider, provider_card_id, auto_unfreeze_before_use, auto_freeze_after_success,
+        auto_freeze_after_failure, status, note, last_used_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       cardGroupId,
       encryptSecret(number, this.secretKey),
@@ -516,6 +527,11 @@ export class PlatformStore {
       Number(input.priority ?? 100),
       Number(input.max_success_count ?? input.maxSuccessCount ?? 1),
       Number(input.success_count ?? input.successCount ?? 0),
+      normalizeProviderName(input.provider ?? "", ["", "vcc"]),
+      String(input.provider_card_id ?? input.providerCardId ?? input.remote_card_id ?? input.remoteCardId ?? "").trim(),
+      boolInt(input.auto_unfreeze_before_use ?? input.autoUnfreezeBeforeUse),
+      boolInt(input.auto_freeze_after_success ?? input.autoFreezeAfterSuccess),
+      boolInt(input.auto_freeze_after_failure ?? input.autoFreezeAfterFailure),
       String(input.status ?? "enabled"),
       String(input.note ?? ""),
       Number(input.last_used_at ?? input.lastUsedAt ?? 0),
@@ -575,8 +591,9 @@ export class PlatformStore {
       UPDATE cards
          SET card_group_id = ?, encrypted_number = ?, encrypted_exp_month = ?,
              encrypted_exp_year = ?, encrypted_cvc = ?, masked_number = ?,
-             priority = ?, max_success_count = ?, status = ?, note = ?,
-             updated_at = ?
+             priority = ?, max_success_count = ?, provider = ?, provider_card_id = ?,
+             auto_unfreeze_before_use = ?, auto_freeze_after_success = ?, auto_freeze_after_failure = ?,
+             status = ?, note = ?, updated_at = ?
        WHERE id = ?
     `).run(
       Number(nextGroupId),
@@ -587,6 +604,11 @@ export class PlatformStore {
       maskCardNumber(nextNumber),
       Number(input.priority ?? current.priority),
       Number(input.max_success_count ?? input.maxSuccessCount ?? current.max_success_count),
+      normalizeProviderName(input.provider ?? current.provider ?? "", ["", "vcc"]),
+      String(input.provider_card_id ?? input.providerCardId ?? input.remote_card_id ?? input.remoteCardId ?? current.provider_card_id ?? "").trim(),
+      boolInt(input.auto_unfreeze_before_use ?? input.autoUnfreezeBeforeUse ?? current.auto_unfreeze_before_use),
+      boolInt(input.auto_freeze_after_success ?? input.autoFreezeAfterSuccess ?? current.auto_freeze_after_success),
+      boolInt(input.auto_freeze_after_failure ?? input.autoFreezeAfterFailure ?? current.auto_freeze_after_failure),
       String(input.status ?? current.status),
       String(input.note ?? current.note),
       now,
@@ -1642,6 +1664,11 @@ export class PlatformStore {
         cvc,
         priority: input.priority ?? remote.priority ?? 100,
         max_success_count: input.max_success_count ?? input.maxSuccessCount ?? 1,
+        provider,
+        provider_card_id: remoteId,
+        auto_unfreeze_before_use: input.auto_unfreeze_before_use ?? input.autoUnfreezeBeforeUse ?? 0,
+        auto_freeze_after_success: input.auto_freeze_after_success ?? input.autoFreezeAfterSuccess ?? 0,
+        auto_freeze_after_failure: input.auto_freeze_after_failure ?? input.autoFreezeAfterFailure ?? 0,
         status: input.status ?? "enabled",
         note: String(input.note_prefix ?? input.notePrefix ?? provider).trim()
           ? `${String(input.note_prefix ?? input.notePrefix ?? provider).trim()} ${remoteId}`.trim()

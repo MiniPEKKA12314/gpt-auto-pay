@@ -40,6 +40,8 @@ export async function runQueueOnce(store, adapterFactory, options = {}) {
     }, {
       now,
       signal: options.signal,
+      fetchImpl: options.fetchImpl,
+      cardProviderFactory: options.cardProviderFactory,
     });
     results.push({
       order_id: order.id,
@@ -72,6 +74,8 @@ export class PlatformQueueWorker {
     this.intervalMs = Number(options.intervalMs ?? 1000);
     this.now = options.now ?? defaultNow;
     this.signal = options.signal;
+    this.fetchImpl = options.fetchImpl;
+    this.cardProviderFactory = options.cardProviderFactory;
     this.logger = typeof options.logger === "function" ? options.logger : () => {};
     this.timer = null;
     this.running = false;
@@ -107,6 +111,8 @@ export class PlatformQueueWorker {
       const result = await runQueueOnce(this.store, this.adapterFactory, {
         now: this.now,
         signal: this.signal,
+        fetchImpl: this.fetchImpl,
+        cardProviderFactory: this.cardProviderFactory,
       });
       if (result.started.length > 0 || result.results.length > 0) {
         this.logger({ type: "tick", ...result });
