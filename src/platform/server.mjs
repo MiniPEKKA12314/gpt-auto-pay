@@ -4,6 +4,7 @@ import { URL } from "node:url";
 import { renderAdminUi } from "./admin_ui.mjs";
 import { createAuditLog } from "./audit.mjs";
 import { ADMIN_SESSION_COOKIE, buildAdminSessionCookie, clearAdminSessionCookie, verifyPassword } from "./auth.mjs";
+import { createKimooxCardProvider } from "./card_provider_kimoox.mjs";
 import { createVccCardProvider } from "./card_provider_vcc.mjs";
 import { renderDevUi } from "./dev_ui.mjs";
 import { PlatformStoreError } from "./db.mjs";
@@ -205,6 +206,7 @@ function mapStoreError(error) {
   if (code === "REDEEM_CODE_DELETED") return { statusCode: 410, code, message: "兑换码已删除" };
   if (code === "REDEEM_CODE_NOT_UNUSED") return { statusCode: 409, code, message: "兑换码正在处理或已使用", details: error.details };
   if (code === "PLAN_NOT_FOUND") return { statusCode: 404, code, message: "套餐配置不存在", details: error.details };
+  if (code === "PLAN_DISABLED") return { statusCode: 409, code, message: error.message, details: error.details };
   if (code === "NOT_FOUND") return { statusCode: 404, code, message: "记录不存在" };
   return { statusCode: 400, code, message: error.message, details: error.details ?? {} };
 }
@@ -241,13 +243,28 @@ function createVccProviderFromStore(store, fetchImpl) {
   return createVccCardProvider(config, { fetchImpl });
 }
 
-function publicVccCard(card = {}) {
+function createKimooxProviderFromStore(store, fetchImpl) {
+  const config = store.getCardProviderConfig("kimoox", { includeSecret: true });
+  if (!config.api_key || !config.api_secret) {
+    throw new PlatformStoreError("KIMOOX_CONFIG_MISSING", "Kimoox 卡台配置不完整，请先填写 API Key 和 API Secret");
+  }
+  return createKimooxCardProvider(config, { fetchImpl });
+}
+
+function createRemoteCardProviderFromStore(store, fetchImpl, provider) {
+  const name = String(provider || "").toLowerCase();
+  if (name === "vcc") return createVccProviderFromStore(store, fetchImpl);
+  if (name === "kimoox") return createKimooxProviderFromStore(store, fetchImpl);
+  throw new PlatformStoreError("CARD_PROVIDER_UNSUPPORTED", `不支持的远程卡台: ${provider}`);
+}
+
+function publicRemoteProviderCard(card = {}, provider = "") {
   return {
-    provider: card.provider ?? "vcc",
-    provider_card_id: card.provider_card_id ?? "",
+    provider: card.provider ?? provider,
+    provider_card_id: card.provider_card_id ?? card.providerCardId ?? "",
     organization: card.organization ?? "",
     state: card.state ?? "",
-    masked_number: card.masked_number ?? "",
+    masked_number: card.masked_number ?? card.maskedNumber ?? "",
     exp_month: card.exp_month ?? "",
     exp_year: card.exp_year ?? "",
     remark: card.remark ?? "",
@@ -255,6 +272,14 @@ function publicVccCard(card = {}) {
     create_time: card.create_time ?? "",
     modify_time: card.modify_time ?? "",
   };
+}
+
+function publicVccCard(card = {}) {
+  return publicRemoteProviderCard(card, "vcc");
+}
+
+function publicKimooxCard(card = {}) {
+  return publicRemoteProviderCard(card, "kimoox");
 }
 
 function vccResultSummary(data = {}) {
@@ -306,6 +331,46 @@ function vccCardTargetFromStoredCard(card = {}) {
     card_num: card.number || "",
     cardNum: card.number || "",
   };
+}
+
+function pickVccCardBalance(cards = [], card = {}) {
+  if (!Array.isArray(cards) || cards.length === 0) return null;
+  const providerId = String(card.provider_card_id || "");
+  const number = String(card.number || "").replace(/\D+/g, "");
+  if (providerId) {
+    const byId = cards.find((row) => String(row.provider_card_id || row.providerCardId || "") === providerId);
+    if (byId) return byId;
+  }
+  if (number) {
+    const byNum = cards.find((row) => String(row.number || "").replace(/\D+/g, "") === number);
+    if (byNum) return byNum;
+  }
+  return cards[0] || null;
+}
+
+async function queryStoredRemoteCardBalance(store, fetchImpl, card) {
+  const providerName = String(card.provider || "").toLowerCase();
+  const provider = createRemoteCardProviderFromStore(store, fetchImpl, providerName);
+  const target = vccCardTargetFromStoredCard(card);
+  const rows = await provider.listCards({
+    pageNumber: 1,
+    pageSize: 10,
+    all: true,
+    userBankId: target.cardId,
+    userBankNum: target.cardNum,
+    cardId: target.cardId,
+    cardNo: target.cardNum,
+  });
+  const remoteCard = pickVccCardBalance(rows, card);
+  if (!remoteCard) throw new PlatformStoreError("REMOTE_CARD_NOT_FOUND", "远程卡台未返回这张卡，无法查询余额");
+  return {
+    card: providerName === "kimoox" ? publicKimooxCard(remoteCard) : publicVccCard(remoteCard),
+    balance_usd: String(remoteCard.card_balance ?? ""),
+  };
+}
+
+async function queryStoredVccCardBalance(store, fetchImpl, card) {
+  return queryStoredRemoteCardBalance(store, fetchImpl, card);
 }
 
 function queueSnapshotWithWorker(store, workerStatusProvider) {
@@ -420,6 +485,14 @@ export function createPlatformRequestHandler(options = {}) {
           return;
         }
         if (!rateLimit(res, limiter, `redeem:code:${code}`, 1, 30_000)) return;
+        const redeem = store.getRedeemCodeByDisplay(code);
+        if (redeem) {
+          const plan = store.getPlanConfig(redeem.plan_type, { includeCardGroups: false });
+          if (!plan.enabled) {
+            sendError(res, 409, "PLAN_DISABLED", "该套餐当前已关闭兑换，请稍后再试或联系管理员", { plan_type: redeem.plan_type });
+            return;
+          }
+        }
         const { order } = store.lockCodeAndCreateOrder({
           code,
           user_ip: ip,
@@ -968,11 +1041,12 @@ export function createPlatformRequestHandler(options = {}) {
         else if (action === "delete") after = store.softDeleteCard(cardId, 1, body.reason ?? "");
         else if (action === "success") after = store.incrementCardSuccessCount(cardId);
         else if (action === "freeze" || action === "unfreeze") {
-          if (String(before.provider || "") !== "vcc") {
+          const providerName = String(before.provider || "").toLowerCase();
+          if (!["vcc", "kimoox"].includes(providerName)) {
             sendError(res, 400, "CARD_PROVIDER_UNSUPPORTED", "该卡未绑定支持冻结/解冻的远端卡台");
             return;
           }
-          const provider = createVccProviderFromStore(store, fetchImpl);
+          const provider = createRemoteCardProviderFromStore(store, fetchImpl, providerName);
           const target = vccCardTargetFromStoredCard(before);
           providerResult = action === "freeze"
             ? await provider.suspendCard(target)
@@ -991,6 +1065,43 @@ export function createPlatformRequestHandler(options = {}) {
           data: after,
           ...(providerResult ? { provider_result: sanitizeVccOperationPayload(providerResult) } : {}),
         });
+        return;
+      }
+
+
+      const cardRemoteAction = url.pathname.match(/^\/api\/admin\/cards\/(\d+)\/(vcc|kimoox)-(balance|recharge)$/);
+      if (req.method === "POST" && cardRemoteAction) {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const cardId = Number(cardRemoteAction[1]);
+        const providerName = cardRemoteAction[2];
+        const action = cardRemoteAction[3];
+        const card = store.getCardById(cardId, { includeSecret: true });
+        if (String(card.provider || "").toLowerCase() !== providerName) {
+          sendError(res, 400, "CARD_PROVIDER_UNSUPPORTED", `该卡不是 ${providerName.toUpperCase()} 远程卡，无法查询或充值卡台余额`);
+          return;
+        }
+        if (action === "balance") {
+          const data = await queryStoredRemoteCardBalance(store, fetchImpl, card);
+          sendJson(res, 200, { ok: true, data });
+          return;
+        }
+        const body = await readJson(req);
+        const amount = String(body.amount ?? "").trim();
+        if (!/^\d+(?:\.\d{1,2})?$/.test(amount) || Number(amount) <= 0) {
+          sendError(res, 400, "REMOTE_CARD_AMOUNT_INVALID", "请输入大于 0 的充值金额（USD，最多 2 位小数）");
+          return;
+        }
+        const provider = createRemoteCardProviderFromStore(store, fetchImpl, providerName);
+        const target = vccCardTargetFromStoredCard(card);
+        const result = await provider.rechargeCard({ bankCardId: target.cardId, bankCardNum: target.cardNum, cardId: target.cardId, amount });
+        adminAudit(store, req, {
+          action: `card_${providerName}_recharge`,
+          target_type: "card",
+          target_id: String(cardId),
+          before: { card_id: cardId, provider_card_id: card.provider_card_id, masked_number: card.masked_number },
+          after: { amount_usd: amount, result: sanitizeVccOperationPayload(result) },
+        });
+        sendJson(res, 200, { ok: true, data: sanitizeVccOperationPayload(result) });
         return;
       }
 
@@ -1227,6 +1338,187 @@ export function createPlatformRequestHandler(options = {}) {
         if (!requireAdmin(req, res, adminToken, url)) return;
         const body = await readJson(req);
         const provider = createVccProviderFromStore(store, fetchImpl);
+        sendJson(res, 200, { ok: true, data: sanitizeVccOperationPayload(await provider.listConsumeOrders(body)) });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/admin/card-providers/kimoox/config") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        sendJson(res, 200, { ok: true, data: store.getCardProviderConfig("kimoox") });
+        return;
+      }
+
+      if ((req.method === "PUT" || req.method === "PATCH") && url.pathname === "/api/admin/card-providers/kimoox/config") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const before = store.getCardProviderConfig("kimoox");
+        const body = await readJson(req);
+        const after = store.setCardProviderConfig("kimoox", body, 1);
+        adminAudit(store, req, {
+          action: "card_provider_kimoox_config_update",
+          target_type: "card_provider",
+          target_id: "kimoox",
+          before,
+          after,
+        });
+        sendJson(res, 200, { ok: true, data: after });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/card-providers/kimoox/test") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        sendJson(res, 200, { ok: true, data: await provider.getUserInfo() });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/admin/card-providers/kimoox/bins") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        sendJson(res, 200, { ok: true, data: await provider.listBins() });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/admin/card-providers/kimoox/cards") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        const cards = await provider.listCards({
+          pageNum: Number(url.searchParams.get("pageNum") || url.searchParams.get("pageNumber") || 1),
+          pageSize: Number(url.searchParams.get("pageSize") || 100),
+          cardId: url.searchParams.get("cardId") || "",
+          cardType: url.searchParams.get("cardType") || "",
+          cardStatus: url.searchParams.get("cardStatus") || "",
+          cardNo: url.searchParams.get("cardNo") || "",
+          last4: url.searchParams.get("last4") || "",
+          batchNo: url.searchParams.get("batchNo") || "",
+          remark: url.searchParams.get("remark") || "",
+        });
+        sendJson(res, 200, { ok: true, data: cards.map(publicKimooxCard) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/card-providers/kimoox/import") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const body = await readJson(req);
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        const remoteCards = await provider.listCardsWithPrivateInfo({
+          pageNum: body.page_num ?? body.pageNum ?? body.pageNumber ?? 1,
+          pageSize: body.page_size ?? body.pageSize ?? 100,
+          cardId: body.card_id ?? body.cardId ?? "",
+          cardType: body.card_type ?? body.cardType ?? "",
+          cardStatus: body.card_status ?? body.cardStatus ?? "",
+          cardNo: body.card_no ?? body.cardNo ?? "",
+          last4: body.last4 ?? "",
+          batchNo: body.batch_no ?? body.batchNo ?? "",
+          remark: body.remark ?? "",
+        });
+        const result = store.importProviderCards({
+          provider: "kimoox",
+          card_group_id: body.card_group_id ?? body.cardGroupId,
+          cards: remoteCards,
+          priority: body.priority,
+          max_success_count: body.max_success_count ?? body.maxSuccessCount,
+          status: body.status ?? "enabled",
+          note_prefix: body.note_prefix ?? body.notePrefix ?? "kimoox",
+          auto_unfreeze_before_use: body.auto_unfreeze_before_use ?? body.autoUnfreezeBeforeUse ?? 1,
+          auto_freeze_after_success: body.auto_freeze_after_success ?? body.autoFreezeAfterSuccess ?? 1,
+          auto_freeze_after_failure: body.auto_freeze_after_failure ?? body.autoFreezeAfterFailure ?? 1,
+        });
+        adminAudit(store, req, {
+          action: "card_provider_kimoox_import",
+          target_type: "card_provider",
+          target_id: "kimoox",
+          after: {
+            imported_count: result.imported_count,
+            skipped_count: result.skipped_count,
+            card_group_id: body.card_group_id ?? body.cardGroupId,
+          },
+        });
+        sendJson(res, 200, { ok: true, data: result });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/card-providers/kimoox/open-card") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const body = await readJson(req);
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        const data = await provider.openCard(body);
+        adminAudit(store, req, {
+          action: "card_provider_kimoox_open_card",
+          target_type: "card_provider",
+          target_id: "kimoox",
+          after: { card_bin_id: body.card_bin_id ?? body.cardBinId ?? body.cardBin, amount: body.amount ?? body.rechargeAmount, result: vccResultSummary(data) },
+        });
+        sendJson(res, 200, { ok: true, data: sanitizeVccOperationPayload(data) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/card-providers/kimoox/open-detail") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const body = await readJson(req);
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        sendJson(res, 200, { ok: true, data: sanitizeVccOperationPayload(await provider.getOpenCardDetail(body)) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/card-providers/kimoox/recharge") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const body = await readJson(req);
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        const data = await provider.rechargeCard(body);
+        adminAudit(store, req, {
+          action: "card_provider_kimoox_recharge",
+          target_type: "card_provider",
+          target_id: "kimoox",
+          after: { card_id: body.card_id ?? body.cardId ?? body.bankCardId ?? "", amount: body.amount, result: vccResultSummary(data) },
+        });
+        sendJson(res, 200, { ok: true, data: sanitizeVccOperationPayload(data) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/card-providers/kimoox/suspend") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const body = await readJson(req);
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        const data = await provider.suspendCard(body);
+        adminAudit(store, req, { action: "card_provider_kimoox_suspend", target_type: "card_provider", target_id: "kimoox", after: { target: vccCardTargetSummary(body), result: sanitizeVccOperationPayload(data) } });
+        sendJson(res, 200, { ok: true, data: sanitizeVccOperationPayload(data) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/card-providers/kimoox/enable") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const body = await readJson(req);
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        const data = await provider.enableCard(body);
+        adminAudit(store, req, { action: "card_provider_kimoox_enable", target_type: "card_provider", target_id: "kimoox", after: { target: vccCardTargetSummary(body), result: sanitizeVccOperationPayload(data) } });
+        sendJson(res, 200, { ok: true, data: sanitizeVccOperationPayload(data) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/card-providers/kimoox/cancel") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const body = await readJson(req);
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        const data = await provider.cancelCard(body);
+        adminAudit(store, req, { action: "card_provider_kimoox_cancel", target_type: "card_provider", target_id: "kimoox", after: { target: vccCardTargetSummary(body), result: sanitizeVccOperationPayload(data) } });
+        sendJson(res, 200, { ok: true, data: sanitizeVccOperationPayload(data) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/card-providers/kimoox/cash-out") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const body = await readJson(req);
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
+        const data = await provider.cashOutCard(body);
+        adminAudit(store, req, { action: "card_provider_kimoox_cash_out", target_type: "card_provider", target_id: "kimoox", after: { target: vccCardTargetSummary(body), result: vccResultSummary(data) } });
+        sendJson(res, 200, { ok: true, data: sanitizeVccOperationPayload(data) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/admin/card-providers/kimoox/consume-orders") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const body = await readJson(req);
+        const provider = createKimooxProviderFromStore(store, fetchImpl);
         sendJson(res, 200, { ok: true, data: sanitizeVccOperationPayload(await provider.listConsumeOrders(body)) });
         return;
       }

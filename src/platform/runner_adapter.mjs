@@ -1,4 +1,5 @@
 import { OrderStatus } from "./constants.mjs";
+import { cleanupKimooxPerOrderCard, planUsesKimooxPerOrder } from "./card_lifecycle.mjs";
 import { decideNextCheckoutRetry, decideNextRetry, isCheckoutPhaseResult, normalizeRetryPolicy } from "./retry_policy.mjs";
 import { selectBillingAddress, selectCard } from "./selection.mjs";
 
@@ -64,12 +65,77 @@ async function failOrder(store, orderId, attemptId, message, stage = "runner", n
   }, now);
 }
 
+function kimooxPerOrderPlaceholderCard(plan = {}) {
+  if (!planUsesKimooxPerOrder(plan)) return null;
+  return {
+    id: 0,
+    card_group_id: Number(plan.card_groups?.[0]?.card_group_id ?? 0),
+    masked_number: "Kimoox 按订单开卡",
+    provider: "kimoox",
+    provider_card_id: "",
+    success_count: 0,
+    max_success_count: 1,
+    status: "enabled",
+  };
+}
+
+function resultCardId(result = {}) {
+  return Number(result?.card?.id ?? result?.kimoox_per_order_card?.local_card_id ?? 0);
+}
+
+
+async function cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime = {}, options = {}, attemptId = 0, now = () => Date.now() / 1000) {
+  if (!planUsesKimooxPerOrder(plan)) return null;
+  const cardId = Number(retryRuntime.kimooxPerOrderCardId ?? retryRuntime.kimoox_per_order_card_id ?? 0);
+  if (!cardId) return null;
+  let card;
+  try {
+    card = store.getCardById(cardId, { includeSecret: true });
+  } catch (error) {
+    store.addRunLog({
+      order_id: order.id,
+      attempt_id: attemptId,
+      level: "error",
+      stage: "kimoox_cleanup",
+      message: `Kimoox ???????????????? ${cardId}`,
+      meta: { error: error.message || String(error), card_id: cardId },
+    }, now());
+    return { ok: false, local_card_id: cardId, errors: [error.message || String(error)] };
+  }
+  if (card.deleted_at) return { skipped: true, reason: "already_deleted", local_card_id: cardId };
+  const emit = createEmit(store, order.id, attemptId, now);
+  const cleanup = await cleanupKimooxPerOrderCard({
+    store,
+    order,
+    plan,
+    card,
+    emit,
+    now,
+    fetchImpl: options.fetchImpl,
+    cardProviderFactory: options.cardProviderFactory,
+    retryRuntime,
+  });
+  retryRuntime.kimooxPerOrderCleanup = cleanup;
+  return cleanup;
+}
+
+function mergeCleanupIntoResult(result = {}, cleanup = null) {
+  if (!cleanup) return result;
+  return {
+    ...result,
+    kimoox_per_order_card: {
+      ...(result.kimoox_per_order_card ?? {}),
+      cleanup,
+    },
+  };
+}
+
 export function resolveOrderResources(store, order) {
   const manualOptions = typeof store.getManualOrderOptions === "function" ? store.getManualOrderOptions(order.id) : null;
   const plan = manualEffectivePlan(store.getPlanConfig(order.plan_type, { includeCardGroups: true }), manualOptions);
   const card = manualOptions?.card_id
     ? store.getCardById(manualOptions.card_id)
-    : selectCard(store.listCards(), plan.card_groups);
+    : kimooxPerOrderPlaceholderCard(plan) || selectCard(store.listCards(), plan.card_groups);
   const billingAddress = manualOptions?.billing_address_id
     ? store.getBillingAddressById(manualOptions.billing_address_id)
     : selectBillingAddress(store.listBillingAddresses(), plan.billing_group_id);
@@ -90,6 +156,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
   }
 
   const { plan, card, billingAddress } = resolveOrderResources(store, order);
+  const retryRuntime = {};
   const attemptNo = store.nextAttemptNo(order.id);
   const attemptId = store.createOrderAttempt({
     order_id: order.id,
@@ -127,7 +194,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
     };
   }
 
-  const secretCard = store.getCardById(card.id, { includeSecret: true });
+  const secretCard = card.id ? store.getCardById(card.id, { includeSecret: true }) : card;
   emit({ level: "info", stage: "runner", message: "runner 开始执行" });
 
   let runnerResult;
@@ -140,6 +207,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
       attemptNo,
       attemptId,
       emit,
+      retryRuntime,
       signal: options.signal,
       ...options,
     });
@@ -148,6 +216,8 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
   }
 
   if (isSuccessResult(runnerResult)) {
+    const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now);
+    runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
     store.updateOrderAttempt(attemptId, {
       status: "success",
       stage: "completed",
@@ -161,7 +231,8 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
       meta: runnerResult,
     }, now());
     const result = store.markOrderSucceeded(order.id, now());
-    const updatedCard = store.incrementCardSuccessCount(card.id, now());
+      const succeededCardId = resultCardId(runnerResult) || card.id;
+    const updatedCard = succeededCardId ? store.incrementCardSuccessCount(succeededCardId, now()) : card;
     return {
       ok: true,
       result: runnerResult,
@@ -173,6 +244,8 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
     };
   }
 
+  const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now);
+  runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
   const message = runnerResult?.message || runnerResult?.error || "runner failed";
   const failed = await failOrder(store, order.id, attemptId, message, "runner", now());
   return {
@@ -252,6 +325,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     ? store.getBillingAddressById(manualOptions.billing_address_id)
     : selectBillingAddress(store.listBillingAddresses(), plan.billing_group_id);
   const previousResults = [];
+  const retryRuntime = {};
   const attemptedCardIds = new Set();
   let card = null;
   let cardAttemptIndex = 0;
@@ -286,7 +360,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     if (!card) {
       card = manualOptions?.card_id
         ? store.getCardById(manualOptions.card_id)
-        : selectCard(store.listCards(), plan.card_groups, { excludeCardIds: attemptedCardIds });
+        : kimooxPerOrderPlaceholderCard(plan) || selectCard(store.listCards(), plan.card_groups, { excludeCardIds: attemptedCardIds });
       if (!card) {
         const attemptId = store.createOrderAttempt({
           order_id: order.id,
@@ -309,10 +383,10 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
           attempts: previousResults,
         };
       }
-      attemptedCardIds.add(Number(card.id));
+      if (card.id) attemptedCardIds.add(Number(card.id));
     }
 
-    const secretCard = store.getCardById(card.id, { includeSecret: true });
+    const secretCard = card.id ? store.getCardById(card.id, { includeSecret: true }) : card;
     const attemptNo = store.nextAttemptNo(order.id);
     const attemptPosition = {
       attempt_no: attemptNo,
@@ -323,13 +397,15 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     const attemptId = store.createOrderAttempt({
       order_id: order.id,
       attempt_no: attemptNo,
-      card_id: card.id,
+      card_id: card.id ?? 0,
       billing_address_id: billingAddress.id,
       status: "running",
       stage: "resource_selected",
     }, now());
     const emit = createEmit(store, order.id, attemptId, now);
     const retry = retryContext(policy, attemptPosition, previousResults);
+    retry.runtime = retryRuntime;
+    retry.retry_runtime = retryRuntime;
     emit({
       level: "info",
       stage: "runner",
@@ -348,6 +424,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
         attemptNo,
         attemptId,
         retry,
+        retryRuntime,
         signal: options.signal,
       }));
       runnerResult = await adapter.execute({
@@ -358,6 +435,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
         attemptNo,
         attemptId,
         retry,
+        retryRuntime,
         emit,
         signal: options.signal,
         ...options,
@@ -370,6 +448,8 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     }
 
     if (isSuccessResult(runnerResult)) {
+      const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now);
+      runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
       store.updateOrderAttempt(attemptId, {
         status: "success",
         stage: "completed",
@@ -383,7 +463,8 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
         meta: runnerResult,
       }, now());
       const result = store.markOrderSucceeded(order.id, now());
-      const updatedCard = store.incrementCardSuccessCount(card.id, now());
+      const succeededCardId = resultCardId(runnerResult) || card.id;
+      const updatedCard = succeededCardId ? store.incrementCardSuccessCount(succeededCardId, now()) : card;
       return {
         ok: true,
         result: runnerResult,
@@ -395,7 +476,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
         attempts: previousResults.concat({
           attempt_id: attemptId,
           attempt_no: attemptNo,
-          card_id: card.id,
+          card_id: card.id ?? 0,
           billing_address_id: billingAddress.id,
           result: runnerResult,
           decision: { action: "complete" },
@@ -412,7 +493,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     previousResults.push({
       attempt_id: attemptId,
       attempt_no: attemptNo,
-      card_id: card.id,
+      card_id: card.id ?? 0,
       billing_address_id: billingAddress.id,
       result: runnerResult,
       decision,
@@ -459,8 +540,11 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
       continue;
     }
 
+    const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now);
+    runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
+    const cleanupSuffix = cleanup?.ok === false ? `?Kimoox ???????: ${(cleanup.errors || []).join("; ")}` : "";
     const failed = store.markOrderFailedAndReleaseCode(order.id, {
-      admin_error: message,
+      admin_error: message + cleanupSuffix,
     }, now());
     return {
       ok: false,
@@ -489,7 +573,8 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     error_code: "RETRY_GUARD_EXHAUSTED",
     error_message: message,
   }, now());
-  const failed = await failOrder(store, order.id, attemptId, message, "retry_guard", now());
+  const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now);
+  const failed = await failOrder(store, order.id, attemptId, message + (cleanup?.ok === false ? `?Kimoox ???????: ${(cleanup.errors || []).join("; ")}` : ""), "retry_guard", now());
   return {
     ok: false,
     result: resultFailed(message, { code: "RETRY_GUARD_EXHAUSTED" }),

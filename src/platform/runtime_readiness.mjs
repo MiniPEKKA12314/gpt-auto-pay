@@ -129,8 +129,13 @@ export function checkPlanRuntimeReadiness(store, planType) {
 
   const cardGroups = Array.isArray(plan.card_groups) ? plan.card_groups : [];
   if (cardGroups.length === 0) issues.push("套餐未绑定卡组");
-  const card = selectCard(store.listCards(), cardGroups);
-  if (cardGroups.length > 0 && !card) issues.push("套餐绑定的卡组里没有可用卡");
+  const kimooxPerOrder = String(plan.kimoox_issue_mode ?? "pool").toLowerCase() === "per_order";
+  const card = kimooxPerOrder ? null : selectCard(store.listCards(), cardGroups);
+  if (!kimooxPerOrder && cardGroups.length > 0 && !card) issues.push("套餐绑定的卡组里没有可用卡");
+  if (kimooxPerOrder) {
+    if (!String(plan.kimoox_card_bin_id ?? "").trim()) issues.push("Kimoox 按订单开卡未配置 BIN ID");
+    if (!String(plan.vcc_target_balance_usd ?? "").trim()) issues.push("Kimoox 按订单开卡未配置目标余额（USD）");
+  }
 
   if (!Number(plan.billing_group_id)) issues.push("套餐未绑定账单地址组");
   const billingAddress = selectBillingAddress(store.listBillingAddresses(), plan.billing_group_id);

@@ -1,6 +1,11 @@
 import { CheckoutSessionAdapter } from "./checkout_runner_adapter.mjs";
 import { DirectCardRunnerAdapter } from "./direct_card_runner_adapter.mjs";
-import { runCardLifecycleAction } from "./card_lifecycle.mjs";
+import {
+  ensureVccCardBalanceBeforeDirectCard,
+  planUsesKimooxPerOrder,
+  prepareKimooxPerOrderCard,
+  runCardLifecycleAction,
+} from "./card_lifecycle.mjs";
 import { PlatformStoreError } from "./db.mjs";
 import { selectProxyForAttempt, selectProxyForAttemptAsync } from "./proxy_pool.mjs";
 
@@ -113,6 +118,8 @@ export class PlatformPaymentAttemptAdapter {
     this.checkoutAdapterOptions = options.checkoutAdapterOptions ?? {};
     this.directCardAdapterOptions = options.directCardAdapterOptions ?? {};
     this.runtimeResolver = options.runtimeResolver;
+    this.fetchImpl = options.fetchImpl;
+    this.cardProviderFactory = options.cardProviderFactory;
   }
 
   async resolveRuntime(context) {
@@ -232,11 +239,30 @@ export class PlatformPaymentAttemptAdapter {
     let directResult;
     let directStarted = false;
     let lifecycleAfterAction = "freeze_failure";
+    let effectiveCard = context.card;
+    let lifecycleContext;
+    let perOrderCard = null;
     try {
-      await runCardLifecycleAction("unfreeze", { ...context, store: this.store, emit });
+      lifecycleContext = {
+        ...context,
+        card: effectiveCard,
+        store: this.store,
+        emit,
+        fetchImpl: this.fetchImpl ?? context.fetchImpl,
+        cardProviderFactory: this.cardProviderFactory ?? context.cardProviderFactory,
+        retryRuntime: context.retryRuntime ?? context.retry?.runtime ?? context.retry?.retry_runtime,
+      };
+      if (planUsesKimooxPerOrder(context.plan)) {
+        perOrderCard = await prepareKimooxPerOrderCard(lifecycleContext);
+        effectiveCard = perOrderCard.card;
+        lifecycleContext = { ...lifecycleContext, card: effectiveCard };
+      }
+      await runCardLifecycleAction("unfreeze", lifecycleContext);
       directStarted = true;
+      await ensureVccCardBalanceBeforeDirectCard(lifecycleContext);
       directResult = await directCardAdapter.execute({
         ...context,
+        card: effectiveCard,
         runtime,
         checkoutInput,
         checkoutResult,
@@ -245,7 +271,9 @@ export class PlatformPaymentAttemptAdapter {
       });
       lifecycleAfterAction = directResult?.status === "success" || directResult?.ok === true ? "freeze_success" : "freeze_failure";
     } catch (error) {
-      directResult = failedResult(error.message || "??????", "DIRECT_CARD_EXCEPTION", {
+      const errorCode = String(error?.code || "");
+      const resultCode = errorCode.startsWith("VCC_") || errorCode.startsWith("KIMOOX_") ? errorCode : "DIRECT_CARD_EXCEPTION";
+      directResult = failedResult(error.message || "direct card exception", resultCode, {
         phase: "direct_card",
         error,
       });
@@ -253,9 +281,16 @@ export class PlatformPaymentAttemptAdapter {
     } finally {
       if (directStarted) {
         try {
-          await runCardLifecycleAction(lifecycleAfterAction, { ...context, store: this.store, emit });
+          await runCardLifecycleAction(lifecycleAfterAction, lifecycleContext ?? {
+            ...context,
+            card: effectiveCard,
+            store: this.store,
+            emit,
+            fetchImpl: this.fetchImpl ?? context.fetchImpl,
+            cardProviderFactory: this.cardProviderFactory ?? context.cardProviderFactory,
+          });
         } catch (error) {
-          const message = error.message || "VCC ???????";
+          const message = error.message || "VCC remote card freeze failed";
           emit({
             level: "error",
             stage: "card_freeze",
@@ -263,7 +298,7 @@ export class PlatformPaymentAttemptAdapter {
             meta: { error: message },
           });
           if (directResult?.status === "success" || directResult?.ok === true) {
-            directResult = failedResult("???????????????????????: " + message, "CARD_FREEZE_FAILED", {
+            directResult = failedResult("Subscription may have succeeded, but VCC remote card freeze failed: " + message, "CARD_FREEZE_FAILED", {
               phase: "direct_card",
               previous: directResult,
             });
@@ -274,6 +309,12 @@ export class PlatformPaymentAttemptAdapter {
     return {
       ...directResult,
       checkout: checkoutResult,
+      card: effectiveCard ? {
+        id: effectiveCard.id ?? 0,
+        masked_number: effectiveCard.masked_number ?? "",
+        provider: effectiveCard.provider ?? "",
+        provider_card_id: effectiveCard.provider_card_id ?? "",
+      } : null,
       directCardProxy: {
         reason: directCardProxy.reason,
         redactedProxyUrl: directCardProxy.redactedProxyUrl,

@@ -8,10 +8,16 @@ export function normalizeConcurrency(value) {
   return n;
 }
 
+function toBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return value === true || value === 1 || value === "1" || String(value).toLowerCase() === "true";
+}
+
 export function createQueueSettings(options = {}) {
   return {
     status: options.status === QueueStatus.PAUSED ? QueueStatus.PAUSED : QueueStatus.RUNNING,
     global_concurrency: normalizeConcurrency(options.global_concurrency ?? 1),
+    pause_on_order_failure: toBoolean(options.pause_on_order_failure ?? options.pauseOnOrderFailure, false),
   };
 }
 

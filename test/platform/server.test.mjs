@@ -166,6 +166,9 @@ test("admin login creates a session cookie for browser admin APIs", async () => 
     assert.match(adminHtml, /data-tab="manual"/);
     assert.match(adminHtml, /id="manualOrderForm"/);
     assert.match(adminHtml, /id="planCheckoutMaxProxy"/);
+    assert.match(adminHtml, /id="planVccTargetBalanceUsd"/);
+    assert.match(adminHtml, /id="vccUserInfoBtn"/);
+    assert.match(adminHtml, /data-card-vcc-balance/);
     assert.match(adminHtml, /auto_unfreeze_before_use/);
     assert.match(adminHtml, /vccImportAutoFreezeSuccess/);
     assert.match(adminHtml, /id="proxyEditForm"/);
@@ -413,6 +416,7 @@ test("admin plan APIs list and update plan runtime configuration", async () => {
         billing_group_id: 3,
         checkout_max_proxy_attempts: 5,
         max_proxy_attempts_per_card: 6,
+        vcc_target_balance_usd: "25.00",
         allow_card_switch: true,
         max_card_switches: 2,
         card_groups: [
@@ -424,6 +428,7 @@ test("admin plan APIs list and update plan runtime configuration", async () => {
     assert.equal(updated.response.status, 200);
     assert.equal(updated.body.data.payment_country, "PH");
     assert.equal(updated.body.data.checkout_max_proxy_attempts, 5);
+    assert.equal(updated.body.data.vcc_target_balance_usd, "25.00");
     assert.equal(updated.body.data.allow_card_switch, 1);
     assert.deepEqual(
       updated.body.data.card_groups.map((group) => [group.card_group_id, group.priority]),
@@ -858,6 +863,12 @@ test("admin card APIs manage groups, encrypted cards, and audit actions", async 
         if (path === "/bank_card/user_info") {
           return new Response(JSON.stringify({ code: 0, content: { name: "vcc", balance: "1" } }), { status: 200 });
         }
+        if (path === "/bank_card/my_cards_page") {
+          return new Response(JSON.stringify({ code: 0, rows: [{ id: "remote-1", number: "4111111111111111", expiryDate: "10/30", cvv: "321", cardBalance: "12.34" }] }), { status: 200 });
+        }
+        if (path === "/bank_card/recharge") {
+          return new Response(JSON.stringify({ code: 0, content: { id: "recharge-manual", state: 1, bankCard: { number: "4111111111111111", cvv: "321" } } }), { status: 200 });
+        }
         return new Response(JSON.stringify({ code: 0, content: {} }), { status: 200 });
       },
     });
@@ -902,6 +913,22 @@ test("admin card APIs manage groups, encrypted cards, and audit actions", async 
       });
       assert.equal(unfrozen.response.status, 200);
       assert.equal(unfrozen.body.data.status, "enabled");
+
+      const cardBalance = await jsonFetch(`${manualProviderApp.url}/api/admin/cards/${remoteCardId}/vcc-balance`, {
+        method: "POST",
+        headers: { "x-admin-token": "admin-token" },
+        body: JSON.stringify({}),
+      });
+      assert.equal(cardBalance.response.status, 200);
+      assert.equal(cardBalance.body.data.balance_usd, "12.34");
+
+      const cardRecharge = await jsonFetch(`${manualProviderApp.url}/api/admin/cards/${remoteCardId}/vcc-recharge`, {
+        method: "POST",
+        headers: { "x-admin-token": "admin-token" },
+        body: JSON.stringify({ amount: "5.00" }),
+      });
+      assert.equal(cardRecharge.response.status, 200);
+      assert.equal(cardRecharge.body.data.bankCard.number, "4111****1111");
     } finally {
       await manualProviderApp.closeAll();
     }
@@ -1489,6 +1516,87 @@ test("public order status endpoint rate limits manual refresh but allows auto po
       assert.equal(poll.response.status, 404);
       assert.equal(poll.body.code, "ORDER_NOT_FOUND");
     }
+  } finally {
+    await app.closeAll();
+  }
+});
+
+test("admin Kimoox provider APIs save config, import decrypted cards, and manage card operations", async () => {
+  const { encryptKimooxSensitiveField } = await import("../../src/platform/card_provider_kimoox.mjs");
+  const calls = [];
+  const webhookSecret = "webhook-secret";
+  const fetchImpl = async (url, options) => {
+    const path = new URL(url).pathname;
+    const body = JSON.parse(String(options.body || "{}"));
+    calls.push({ path, body, options });
+    assert.ok(options.headers["x-vcc-signature"]);
+    if (path === "/openapi/v1/account/balance/query") {
+      return new Response(JSON.stringify({ code: 200, data: { balances: [{ currency: "USD", balance: "50.00", availableBalance: "49.00" }] } }), { status: 200 });
+    }
+    if (path === "/openapi/v1/card-bins/query") {
+      return new Response(JSON.stringify({ code: 200, data: { list: [{ binId: 1001, bin: "486880" }] } }), { status: 200 });
+    }
+    if (path === "/openapi/v1/cards/query") {
+      return new Response(JSON.stringify({ code: 200, data: { list: [{ cardId: "VC1", cardNoMask: "424242****4242", cardStatus: "ACTIVE", balance: "12.34", remark: "main" }] } }), { status: 200 });
+    }
+    if (path === "/openapi/v1/cards/private-info/query") {
+      return new Response(JSON.stringify({ code: 200, data: {
+        cardId: body.cardId,
+        cardNumberCiphertext: encryptKimooxSensitiveField("4242424242424242", webhookSecret, Buffer.alloc(12, 8)),
+        expiryDateCiphertext: encryptKimooxSensitiveField("11/32", webhookSecret, Buffer.alloc(12, 9)),
+        cvvCiphertext: encryptKimooxSensitiveField("321", webhookSecret, Buffer.alloc(12, 10)),
+      } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ code: 200, data: { cardId: body.cardId || "VC1", requestNo: body.requestNo || "REQ", operationType: body.operationType || "", status: "SUBMITTED", amount: body.amount || "" } }), { status: 200 });
+  };
+  const app = await createTestApp({ adminToken: "admin-token", fetchImpl });
+  try {
+    const config = await jsonFetch(`${app.url}/api/admin/card-providers/kimoox/config`, {
+      method: "PUT",
+      headers: { "x-admin-token": "admin-token" },
+      body: JSON.stringify({ base_url: "https://api.kimoox.test", api_key: "ak", api_secret: "sk", webhook_secret: webhookSecret }),
+    });
+    assert.equal(config.response.status, 200);
+    assert.equal(config.body.data.api_secret_configured, true);
+    assert.equal(config.body.data.webhook_secret_configured, true);
+    assert.equal(Object.hasOwn(config.body.data, "api_secret"), false);
+
+    const account = await jsonFetch(`${app.url}/api/admin/card-providers/kimoox/test`, { method: "POST", headers: { "x-admin-token": "admin-token" }, body: "{}" });
+    assert.equal(account.body.data.balances[0].balance, "50.00");
+
+    const bins = await jsonFetch(`${app.url}/api/admin/card-providers/kimoox/bins`, { headers: { "x-admin-token": "admin-token" } });
+    assert.equal(bins.body.data[0].binId, 1001);
+
+    const group = await jsonFetch(`${app.url}/api/admin/card-groups`, {
+      method: "POST",
+      headers: { "x-admin-token": "admin-token" },
+      body: JSON.stringify({ name: "kimoox imported" }),
+    });
+    const imported = await jsonFetch(`${app.url}/api/admin/card-providers/kimoox/import`, {
+      method: "POST",
+      headers: { "x-admin-token": "admin-token" },
+      body: JSON.stringify({ card_group_id: group.body.data.id, max_success_count: 5, cardId: "VC1" }),
+    });
+    assert.equal(imported.body.data.imported_count, 1);
+    const detail = app.store.getCardById(imported.body.data.imported[0].id, { includeSecret: true });
+    assert.equal(detail.provider, "kimoox");
+    assert.equal(detail.provider_card_id, "VC1");
+    assert.equal(detail.number, "4242424242424242");
+    assert.equal(detail.exp_month, "11");
+    assert.equal(detail.exp_year, "2032");
+    assert.equal(detail.cvc, "321");
+
+    const balance = await jsonFetch(`${app.url}/api/admin/cards/${detail.id}/kimoox-balance`, { method: "POST", headers: { "x-admin-token": "admin-token" }, body: "{}" });
+    assert.equal(balance.body.data.balance_usd, "12.34");
+
+    const recharge = await jsonFetch(`${app.url}/api/admin/cards/${detail.id}/kimoox-recharge`, { method: "POST", headers: { "x-admin-token": "admin-token" }, body: JSON.stringify({ amount: "10.00" }) });
+    assert.equal(recharge.response.status, 200);
+
+    const freeze = await jsonFetch(`${app.url}/api/admin/cards/${detail.id}/freeze`, { method: "POST", headers: { "x-admin-token": "admin-token" }, body: "{}" });
+    assert.equal(freeze.response.status, 200);
+    const paths = calls.map((call) => call.path);
+    assert.ok(paths.includes("/openapi/v1/cards/funds/operate"));
+    assert.ok(paths.includes("/openapi/v1/cards/status/operate"));
   } finally {
     await app.closeAll();
   }

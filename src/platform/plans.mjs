@@ -22,6 +22,26 @@ function normalizeBoolean(value, fallback = false) {
   return value === true || value === 1 || value === "1" || value === "true";
 }
 
+function normalizeUsdAmount(value, fallback = "", field = "usd_amount") {
+  const raw = value === undefined || value === null || value === "" ? fallback : value;
+  const text = String(raw ?? "").trim();
+  if (!text) return "";
+  if (!/^\d+(?:\.\d{1,2})?$/.test(text)) {
+    throw new Error(`${field} must be a USD amount with up to 2 decimals`);
+  }
+  const n = Number(text);
+  if (!Number.isFinite(n) || n < 0 || n > 1000000) {
+    throw new Error(`${field} must be between 0 and 1000000 USD`);
+  }
+  return text;
+}
+
+function normalizeKimooxIssueMode(value, fallback = "pool") {
+  const text = String(value === undefined || value === null || value === "" ? fallback : value).trim().toLowerCase();
+  if (["pool", "per_order"].includes(text)) return text;
+  throw new Error("kimoox_issue_mode must be pool or per_order");
+}
+
 export function normalizePlanConfig(input = {}, defaults = {}) {
   const planType = normalizePlanType(input.plan_type ?? input.planType);
   const defaultFailureMessage = String(defaults.failure_message ?? defaults.failureMessage ?? DEFAULT_FAILURE_MESSAGE);
@@ -38,6 +58,15 @@ export function normalizePlanConfig(input = {}, defaults = {}) {
     failure_message: String(input.failure_message ?? input.failureMessage ?? defaultFailureMessage),
     checkout_max_proxy_attempts: integerInRange(input.checkout_max_proxy_attempts ?? input.checkoutMaxProxyAttempts, 4, 1, 1000, "checkout_max_proxy_attempts"),
     max_proxy_attempts_per_card: integerInRange(input.max_proxy_attempts_per_card ?? input.maxProxyAttemptsPerCard, 4, 1, 1000, "max_proxy_attempts_per_card"),
+    vcc_target_balance_usd: normalizeUsdAmount(input.vcc_target_balance_usd ?? input.vccTargetBalanceUsd ?? defaults.vcc_target_balance_usd ?? "", "", "vcc_target_balance_usd"),
+    kimoox_issue_mode: normalizeKimooxIssueMode(input.kimoox_issue_mode ?? input.kimooxIssueMode, defaults.kimoox_issue_mode ?? "pool"),
+    kimoox_card_bin_id: String(input.kimoox_card_bin_id ?? input.kimooxCardBinId ?? defaults.kimoox_card_bin_id ?? "").trim(),
+    kimoox_card_type: String(input.kimoox_card_type ?? input.kimooxCardType ?? defaults.kimoox_card_type ?? "PREPAID").trim() || "PREPAID",
+    kimoox_holder_id: String(input.kimoox_holder_id ?? input.kimooxHolderId ?? defaults.kimoox_holder_id ?? "").trim(),
+    kimoox_card_group_id: String(input.kimoox_card_group_id ?? input.kimooxCardGroupId ?? defaults.kimoox_card_group_id ?? "").trim(),
+    kimoox_budget_id: String(input.kimoox_budget_id ?? input.kimooxBudgetId ?? defaults.kimoox_budget_id ?? "").trim(),
+    kimoox_reclaim_balance: normalizeBoolean(input.kimoox_reclaim_balance ?? input.kimooxReclaimBalance, defaults.kimoox_reclaim_balance ?? true),
+    kimoox_cancel_after_order: normalizeBoolean(input.kimoox_cancel_after_order ?? input.kimooxCancelAfterOrder, defaults.kimoox_cancel_after_order ?? true),
     allow_card_switch: normalizeBoolean(input.allow_card_switch ?? input.allowCardSwitch, false),
     max_card_switches: integerInRange(input.max_card_switches ?? input.maxCardSwitches, 0, 0, 1000, "max_card_switches"),
   };

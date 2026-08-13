@@ -246,7 +246,7 @@ test("card lifecycle only runs around direct card execution", async () => {
       directCardAdapterFactory: () => ({
         async execute() {
           actions.push("direct");
-          return { status: "success", message: "????" };
+          return { status: "success", message: "success" };
         },
       }),
     });
@@ -433,6 +433,85 @@ test("shared IPWO credential proxy switches direct-card session after direct pro
     assert.equal(attempts.length, 2);
     assert.equal(attempts[0].direct_card_proxy_session, attempts[0].checkout_proxy_session);
     assert.notEqual(attempts[1].direct_card_proxy_session, attempts[0].checkout_proxy_session);
+  } finally {
+    store.close();
+  }
+});
+
+
+test("VCC target balance is checked and recharged before direct card", async () => {
+  const { store, cardId, orderId } = createProcessorStore();
+  try {
+    store.setCardProviderConfig("vcc", { user_serial: "user-1", secret_key: "secret" }, 70);
+    store.updateCard(cardId, {
+      provider: "vcc",
+      provider_card_id: "remote-balance-1",
+      auto_unfreeze_before_use: true,
+      auto_freeze_after_success: true,
+      auto_freeze_after_failure: true,
+    }, 71);
+    store.upsertPlanConfig({
+      ...store.getPlanConfig("plus"),
+      vcc_target_balance_usd: "25.00",
+    }, 72);
+
+    const actions = [];
+    let cardBalanceCents = 1000;
+    const factory = createPlatformPaymentAdapterFactory({
+      checkoutAdapterFactory: () => ({
+        async execute() {
+          actions.push("checkout");
+          return { ok: true, status: "success", checkoutInput: "oaics_balance", checkout_input: "oaics_balance" };
+        },
+      }),
+      directCardAdapterFactory: () => ({
+        async execute() {
+          actions.push("direct");
+          return { status: "success", message: "success" };
+        },
+      }),
+    });
+    const cardProviderFactory = () => ({
+      async enableCard(target) {
+        actions.push("enable:" + target.cardId);
+        return { ok: true };
+      },
+      async suspendCard(target) {
+        actions.push("suspend:" + target.cardId);
+        return { ok: true };
+      },
+      async listCards(input) {
+        actions.push("balance:" + (input.userBankId || ""));
+        return [{ provider_card_id: "remote-balance-1", card_balance: (cardBalanceCents / 100).toFixed(2), masked_number: "4242 **** **** 4242" }];
+      },
+      async rechargeCard(input) {
+        actions.push("recharge:" + input.amount);
+        assert.equal(input.amount, "15.00");
+        cardBalanceCents = 2500;
+        return { id: "recharge-1", state: 1 };
+      },
+      async getRechargeDetail(input) {
+        actions.push("detail:" + input.rechargeId);
+        return { id: input.rechargeId, state: 10 };
+      },
+    });
+
+    const result = await runPlatformOrderWithRetry(store, orderId, factory, { now: () => 400, cardProviderFactory });
+    assert.equal(result.ok, true);
+    assert.deepEqual(actions, [
+      "checkout",
+      "enable:remote-balance-1",
+      "balance:remote-balance-1",
+      "recharge:15.00",
+      "detail:recharge-1",
+      "balance:remote-balance-1",
+      "direct",
+      "suspend:remote-balance-1",
+    ]);
+    const messages = store.listRunLogs(orderId).map((log) => log.message).join("\n");
+    const stages = store.listRunLogs(orderId).map((log) => log.stage);
+    assert.equal(stages.includes("card_recharge"), true);
+    assert.equal(stages.includes("card_balance"), true);
   } finally {
     store.close();
   }

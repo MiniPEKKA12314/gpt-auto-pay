@@ -107,6 +107,26 @@ export function classifyAttemptResult(result = {}) {
     };
   }
 
+  if (/vcc_config_missing/.test(text)) {
+    return {
+      ok: false,
+      category: "card_provider_config",
+      retry_proxy: false,
+      switch_card: false,
+      terminal: true,
+    };
+  }
+
+  if (/vcc_|kimoox_|card_balance_prep_failed|card balance|card_balance|card_recharge|balance_usd|recharge_id/.test(text)) {
+    return {
+      ok: false,
+      category: "card_provider_or_balance",
+      retry_proxy: false,
+      switch_card: true,
+      terminal: false,
+    };
+  }
+
   if (/proxy|socks|connect|tunnel|econnreset|timeout|timed out|ssl|packet length|403|429|captcha|human verification|verify you are human|card_input_frame_not_mounted|payment_targets_unavailable|page_load_failed|chrome-error/.test(text)) {
     return {
       ok: false,

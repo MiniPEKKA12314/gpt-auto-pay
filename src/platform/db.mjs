@@ -43,6 +43,15 @@ function ensureColumn(db, table, column, definition) {
 
 function ensurePlatformMigrations(db) {
   ensureColumn(db, "plan_configs", "checkout_max_proxy_attempts", "INTEGER NOT NULL DEFAULT 4");
+  ensureColumn(db, "plan_configs", "vcc_target_balance_usd", "TEXT DEFAULT ''");
+  ensureColumn(db, "plan_configs", "kimoox_issue_mode", "TEXT NOT NULL DEFAULT 'pool'");
+  ensureColumn(db, "plan_configs", "kimoox_card_bin_id", "TEXT DEFAULT ''");
+  ensureColumn(db, "plan_configs", "kimoox_card_type", "TEXT DEFAULT 'PREPAID'");
+  ensureColumn(db, "plan_configs", "kimoox_holder_id", "TEXT DEFAULT ''");
+  ensureColumn(db, "plan_configs", "kimoox_card_group_id", "TEXT DEFAULT ''");
+  ensureColumn(db, "plan_configs", "kimoox_budget_id", "TEXT DEFAULT ''");
+  ensureColumn(db, "plan_configs", "kimoox_reclaim_balance", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "plan_configs", "kimoox_cancel_after_order", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn(db, "cards", "provider", "TEXT DEFAULT ''");
   ensureColumn(db, "cards", "provider_card_id", "TEXT DEFAULT ''");
   ensureColumn(db, "cards", "auto_unfreeze_before_use", "INTEGER NOT NULL DEFAULT 0");
@@ -148,8 +157,11 @@ function normalizeProviderName(value, supported) {
   return provider;
 }
 
+const REMOTE_CARD_PROVIDERS = ["vcc", "kimoox"];
+const CARD_PROVIDERS = ["", ...REMOTE_CARD_PROVIDERS];
+
 function cardProviderSettingKey(provider) {
-  return `card_provider.${normalizeProviderName(provider, ["vcc"])}`;
+  return `card_provider.${normalizeProviderName(provider, REMOTE_CARD_PROVIDERS)}`;
 }
 
 function toInteger(value, fallback, min, max, field) {
@@ -161,13 +173,23 @@ function toInteger(value, fallback, min, max, field) {
 }
 
 function defaultCardProviderConfig(provider) {
-  const name = normalizeProviderName(provider, ["vcc"]);
+  const name = normalizeProviderName(provider, REMOTE_CARD_PROVIDERS);
   if (name === "vcc") {
     return {
       provider: "vcc",
       base_url: "http://api.vcc.center",
       user_serial: "",
       secret_key_encrypted: "",
+      timeout_ms: 15_000,
+    };
+  }
+  if (name === "kimoox") {
+    return {
+      provider: "kimoox",
+      base_url: "https://docs.kimoox.com",
+      api_key: "",
+      api_secret_encrypted: "",
+      webhook_secret_encrypted: "",
       timeout_ms: 15_000,
     };
   }
@@ -327,8 +349,10 @@ export class PlatformStore {
         plan_type, display_name, enabled, payment_country, payment_currency,
         checkout_template_key, checkout_proxy_group_id, direct_card_proxy_group_id,
         billing_group_id, failure_message, checkout_max_proxy_attempts, max_proxy_attempts_per_card,
-        allow_card_switch, max_card_switches, created_at, updated_at
-      ) VALUES (?, ?, ?, '', '', '', 0, 0, 0, '', 4, 4, 0, 0, ?, ?)
+        vcc_target_balance_usd, kimoox_issue_mode, kimoox_card_bin_id, kimoox_card_type,
+        kimoox_holder_id, kimoox_card_group_id, kimoox_budget_id, kimoox_reclaim_balance,
+        kimoox_cancel_after_order, allow_card_switch, max_card_switches, created_at, updated_at
+      ) VALUES (?, ?, ?, '', '', '', 0, 0, 0, '', 4, 4, '', 'pool', '', 'PREPAID', '', '', '', 1, 1, 0, 0, ?, ?)
     `);
     for (const [planType, displayName] of Object.entries(DEFAULT_PLAN_NAMES)) {
       insert.run(planType, displayName, 1, now, now);
@@ -342,8 +366,10 @@ export class PlatformStore {
         plan_type, display_name, enabled, payment_country, payment_currency,
         checkout_template_key, checkout_proxy_group_id, direct_card_proxy_group_id,
         billing_group_id, failure_message, checkout_max_proxy_attempts, max_proxy_attempts_per_card,
-        allow_card_switch, max_card_switches, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        vcc_target_balance_usd, kimoox_issue_mode, kimoox_card_bin_id, kimoox_card_type,
+        kimoox_holder_id, kimoox_card_group_id, kimoox_budget_id, kimoox_reclaim_balance,
+        kimoox_cancel_after_order, allow_card_switch, max_card_switches, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(plan_type) DO UPDATE SET
         display_name = excluded.display_name,
         enabled = excluded.enabled,
@@ -356,6 +382,15 @@ export class PlatformStore {
         failure_message = excluded.failure_message,
         checkout_max_proxy_attempts = excluded.checkout_max_proxy_attempts,
         max_proxy_attempts_per_card = excluded.max_proxy_attempts_per_card,
+        vcc_target_balance_usd = excluded.vcc_target_balance_usd,
+        kimoox_issue_mode = excluded.kimoox_issue_mode,
+        kimoox_card_bin_id = excluded.kimoox_card_bin_id,
+        kimoox_card_type = excluded.kimoox_card_type,
+        kimoox_holder_id = excluded.kimoox_holder_id,
+        kimoox_card_group_id = excluded.kimoox_card_group_id,
+        kimoox_budget_id = excluded.kimoox_budget_id,
+        kimoox_reclaim_balance = excluded.kimoox_reclaim_balance,
+        kimoox_cancel_after_order = excluded.kimoox_cancel_after_order,
         allow_card_switch = excluded.allow_card_switch,
         max_card_switches = excluded.max_card_switches,
         updated_at = excluded.updated_at
@@ -372,6 +407,15 @@ export class PlatformStore {
       config.failure_message,
       config.checkout_max_proxy_attempts,
       config.max_proxy_attempts_per_card,
+      config.vcc_target_balance_usd,
+      config.kimoox_issue_mode,
+      config.kimoox_card_bin_id,
+      config.kimoox_card_type,
+      config.kimoox_holder_id,
+      config.kimoox_card_group_id,
+      config.kimoox_budget_id,
+      boolInt(config.kimoox_reclaim_balance),
+      boolInt(config.kimoox_cancel_after_order),
       boolInt(config.allow_card_switch),
       config.max_card_switches,
       now,
@@ -527,7 +571,7 @@ export class PlatformStore {
       Number(input.priority ?? 100),
       Number(input.max_success_count ?? input.maxSuccessCount ?? 1),
       Number(input.success_count ?? input.successCount ?? 0),
-      normalizeProviderName(input.provider ?? "", ["", "vcc"]),
+      normalizeProviderName(input.provider ?? "", CARD_PROVIDERS),
       String(input.provider_card_id ?? input.providerCardId ?? input.remote_card_id ?? input.remoteCardId ?? "").trim(),
       boolInt(input.auto_unfreeze_before_use ?? input.autoUnfreezeBeforeUse),
       boolInt(input.auto_freeze_after_success ?? input.autoFreezeAfterSuccess),
@@ -604,7 +648,7 @@ export class PlatformStore {
       maskCardNumber(nextNumber),
       Number(input.priority ?? current.priority),
       Number(input.max_success_count ?? input.maxSuccessCount ?? current.max_success_count),
-      normalizeProviderName(input.provider ?? current.provider ?? "", ["", "vcc"]),
+      normalizeProviderName(input.provider ?? current.provider ?? "", CARD_PROVIDERS),
       String(input.provider_card_id ?? input.providerCardId ?? input.remote_card_id ?? input.remoteCardId ?? current.provider_card_id ?? "").trim(),
       boolInt(input.auto_unfreeze_before_use ?? input.autoUnfreezeBeforeUse ?? current.auto_unfreeze_before_use),
       boolInt(input.auto_freeze_after_success ?? input.autoFreezeAfterSuccess ?? current.auto_freeze_after_success),
@@ -1488,6 +1532,21 @@ export class PlatformStore {
     return getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
   }
 
+
+  updateOrderAttemptResources(attemptId, input = {}, now = nowSeconds()) {
+    const current = getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
+    this.db.prepare(`
+      UPDATE order_attempts
+         SET card_id = ?, billing_address_id = ?
+       WHERE id = ?
+    `).run(
+      Number(input.card_id ?? input.cardId ?? current.card_id ?? 0),
+      Number(input.billing_address_id ?? input.billingAddressId ?? current.billing_address_id ?? 0),
+      Number(attemptId),
+    );
+    return getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
+  }
+
   setOrderAttemptProxies(attemptId, input = {}) {
     const current = getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
     this.db.prepare(`
@@ -1589,8 +1648,25 @@ export class PlatformStore {
   }
 
   getCardProviderConfig(provider = "vcc", options = {}) {
-    const normalizedProvider = normalizeProviderName(provider, ["vcc"]);
+    const normalizedProvider = normalizeProviderName(provider, REMOTE_CARD_PROVIDERS);
     const raw = this.getSystemJson(cardProviderSettingKey(normalizedProvider), defaultCardProviderConfig(normalizedProvider));
+    if (normalizedProvider === "kimoox") {
+      const result = {
+        provider: "kimoox",
+        base_url: String(raw.base_url ?? "https://docs.kimoox.com"),
+        api_key: String(raw.api_key ?? ""),
+        api_secret_configured: Boolean(raw.api_secret_encrypted),
+        webhook_secret_configured: Boolean(raw.webhook_secret_encrypted),
+        timeout_ms: toInteger(raw.timeout_ms, 15_000, 1_000, 120_000, "timeout_ms"),
+        updated_at: Number(raw.updated_at ?? 0),
+        updated_by: Number(raw.updated_by ?? 0),
+      };
+      if (options.includeSecret) {
+        result.api_secret = raw.api_secret_encrypted ? decryptSecret(raw.api_secret_encrypted, this.secretKey) : "";
+        result.webhook_secret = raw.webhook_secret_encrypted ? decryptSecret(raw.webhook_secret_encrypted, this.secretKey) : "";
+      }
+      return result;
+    }
     const result = {
       provider: normalizedProvider,
       base_url: String(raw.base_url ?? "http://api.vcc.center"),
@@ -1607,8 +1683,28 @@ export class PlatformStore {
   }
 
   setCardProviderConfig(provider = "vcc", input = {}, adminId = 1, now = nowSeconds()) {
-    const normalizedProvider = normalizeProviderName(provider, ["vcc"]);
+    const normalizedProvider = normalizeProviderName(provider, REMOTE_CARD_PROVIDERS);
     const current = this.getSystemJson(cardProviderSettingKey(normalizedProvider), defaultCardProviderConfig(normalizedProvider));
+    if (normalizedProvider === "kimoox") {
+      const apiSecretInput = input.api_secret ?? input.apiSecret;
+      const webhookSecretInput = input.webhook_secret ?? input.webhookSecret;
+      const next = {
+        provider: "kimoox",
+        base_url: String(input.base_url ?? input.baseUrl ?? current.base_url ?? "https://docs.kimoox.com").trim() || "https://docs.kimoox.com",
+        api_key: String(input.api_key ?? input.apiKey ?? current.api_key ?? "").trim(),
+        api_secret_encrypted: apiSecretInput !== undefined && String(apiSecretInput ?? "").trim()
+          ? encryptSecret(String(apiSecretInput).trim(), this.secretKey)
+          : String(current.api_secret_encrypted ?? ""),
+        webhook_secret_encrypted: webhookSecretInput !== undefined && String(webhookSecretInput ?? "").trim()
+          ? encryptSecret(String(webhookSecretInput).trim(), this.secretKey)
+          : String(current.webhook_secret_encrypted ?? ""),
+        timeout_ms: toInteger(input.timeout_ms ?? input.timeoutMs ?? current.timeout_ms, 15_000, 1_000, 120_000, "timeout_ms"),
+        updated_at: now,
+        updated_by: Number(adminId),
+      };
+      this.setSystemJson(cardProviderSettingKey(normalizedProvider), next, adminId, now);
+      return this.getCardProviderConfig(normalizedProvider);
+    }
     const secretInput = input.secret_key ?? input.secretKey;
     const next = {
       provider: normalizedProvider,
@@ -1635,7 +1731,7 @@ export class PlatformStore {
   }
 
   importProviderCards(input = {}, now = nowSeconds()) {
-    const provider = normalizeProviderName(input.provider ?? "vcc", ["vcc"]);
+    const provider = normalizeProviderName(input.provider ?? "vcc", REMOTE_CARD_PROVIDERS);
     const cardGroupId = Number(input.card_group_id ?? input.cardGroupId);
     if (!cardGroupId) throw new Error("card_group_id is required");
     const cards = Array.isArray(input.cards) ? input.cards : [];
@@ -1694,6 +1790,7 @@ export class PlatformStore {
     return createQueueSettings(this.getSystemJson("queue.settings", {
       status: QueueStatus.RUNNING,
       global_concurrency: 1,
+      pause_on_order_failure: false,
     }));
   }
 
@@ -1702,6 +1799,7 @@ export class PlatformStore {
     const next = createQueueSettings({
       status: input.status ?? current.status,
       global_concurrency: input.global_concurrency ?? input.globalConcurrency ?? current.global_concurrency,
+      pause_on_order_failure: input.pause_on_order_failure ?? input.pauseOnOrderFailure ?? current.pause_on_order_failure,
     });
     this.setSystemJson("queue.settings", next, adminId, now);
     return next;
@@ -1755,6 +1853,7 @@ export class PlatformStore {
     return {
       status: settings.status,
       concurrency: settings.global_concurrency,
+      pause_on_order_failure: settings.pause_on_order_failure,
       queued: counts.queued ?? 0,
       running: counts.running ?? 0,
     };
