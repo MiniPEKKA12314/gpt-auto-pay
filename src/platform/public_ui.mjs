@@ -623,6 +623,38 @@ export function renderPublicUi(options = {}) {
       }
     }
 
+    function decodeAccessTokenPayload(accessToken) {
+      const parts = String(accessToken || "").trim().split(".");
+      if (parts.length < 2 || !parts[1]) throw new Error("Access Token 格式不正确，无法识别账号套餐");
+      try {
+        const encoded = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+        const padded = encoded + "=".repeat((4 - encoded.length % 4) % 4);
+        const binary = window.atob(padded);
+        const bytes = [];
+        for (let index = 0; index < binary.length; index += 1) bytes.push("%" + binary.charCodeAt(index).toString(16).padStart(2, "0"));
+        return JSON.parse(decodeURIComponent(bytes.join("")));
+      } catch {
+        throw new Error("Access Token 无法解析，请重新复制 chatgpt.com/api/auth/session 的完整 JSON");
+      }
+    }
+
+    function normalizeAccountPlan(value) {
+      return String(value || "").trim().toLowerCase().replace(/^chatgpt[_-]?/, "");
+    }
+
+    function requireFreeAccount(accessToken) {
+      const payload = decodeAccessTokenPayload(accessToken);
+      const auth = payload && payload["https://api.openai.com/auth"];
+      const rawPlan = auth && auth.chatgpt_plan_type;
+      const plan = normalizeAccountPlan(rawPlan);
+      if (!plan) throw new Error("无法从 Access Token 识别账号套餐，请重新复制最新授权凭证");
+      if (plan !== "free") {
+        const label = String(rawPlan || plan).trim();
+        throw new Error("检测到已生效套餐 " + label + "，请更换免费版账号");
+      }
+      return { plan: plan, label: "Free" };
+    }
+
     function credentialMissingMessage(out, parseError) {
       const missing = [];
       if (!out.accessToken) missing.push("Access Token");
@@ -653,6 +685,7 @@ export function renderPublicUi(options = {}) {
       if (parseError && !out.warning) {
         out.warning = "JSON 格式不完整，已从文本中识别到必要字段";
       }
+      out.accountPlan = requireFreeAccount(out.accessToken);
       return out;
     }
 
@@ -666,9 +699,11 @@ export function renderPublicUi(options = {}) {
       }
       try {
         const credential = parseCredential(text);
-        setCredentialHint(credential.warning || "已识别 Access Token 和 Session Token", credential.warning ? "warn" : "ok");
+        setCredentialHint(credential.warning || "已识别免费版账号，可以提交", credential.warning ? "warn" : "ok");
+        $("submitBtn").disabled = false;
       } catch (error) {
         setCredentialHint(error.message || "授权凭证格式不正确", "bad");
+        $("submitBtn").disabled = true;
       }
     }
 
@@ -686,9 +721,11 @@ export function renderPublicUi(options = {}) {
       }
       $("submitBtn").disabled = true;
       setStep("submit");
+      let credentialAccepted = false;
       try {
         const credential = parseCredential($("credentialInput").value);
-        setCredentialHint(credential.warning || "已识别 Access Token 和 Session Token", credential.warning ? "warn" : "ok");
+        credentialAccepted = true;
+        setCredentialHint(credential.warning || "已识别免费版账号，可以提交", credential.warning ? "warn" : "ok");
         const payload = {
           code: code,
           accessToken: credential.accessToken,
@@ -706,7 +743,7 @@ export function renderPublicUi(options = {}) {
         const message = isRateLimitError(error) ? "提交过于频繁，请稍后再试。" : ((error.data && error.data.message) || error.message);
         renderStatus({ status: "created", message: message, transient: true });
       } finally {
-        $("submitBtn").disabled = false;
+        $("submitBtn").disabled = !credentialAccepted;
       }
     }
 
