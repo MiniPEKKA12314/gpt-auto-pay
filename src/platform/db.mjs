@@ -10,6 +10,7 @@ import { createQueueSettings } from "./queue.mjs";
 import { exportRedeemCodes, hashRedeemCode, generateRedeemCode, normalizeRedeemCode } from "./redeem.mjs";
 
 const schemaUrl = new URL("./schema.sql", import.meta.url);
+const DEFAULT_KIMOOX_WEBHOOK_URL = "https://minipekka.ayuekp.store/api/webhooks/kimoox";
 
 export class PlatformStoreError extends Error {
   constructor(code, message, details = {}) {
@@ -43,7 +44,15 @@ function ensureColumn(db, table, column, definition) {
 
 function ensurePlatformMigrations(db) {
   ensureColumn(db, "plan_configs", "checkout_max_proxy_attempts", "INTEGER NOT NULL DEFAULT 4");
+  ensureColumn(db, "plan_configs", "card_source", "TEXT NOT NULL DEFAULT 'local'");
   ensureColumn(db, "plan_configs", "vcc_target_balance_usd", "TEXT DEFAULT ''");
+  ensureColumn(db, "plan_configs", "vcc_card_bin", "TEXT DEFAULT ''");
+  ensureColumn(db, "plan_configs", "vcc_open_email", "TEXT DEFAULT ''");
+  ensureColumn(db, "plan_configs", "remote_max_cards", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "plan_configs", "remote_success_withdraw", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "plan_configs", "remote_success_final_action", "TEXT NOT NULL DEFAULT 'cancel'");
+  ensureColumn(db, "plan_configs", "remote_failure_withdraw", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "plan_configs", "remote_failure_final_action", "TEXT NOT NULL DEFAULT 'cancel'");
   ensureColumn(db, "plan_configs", "kimoox_issue_mode", "TEXT NOT NULL DEFAULT 'pool'");
   ensureColumn(db, "plan_configs", "kimoox_card_bin_id", "TEXT DEFAULT ''");
   ensureColumn(db, "plan_configs", "kimoox_card_type", "TEXT DEFAULT 'PREPAID'");
@@ -75,6 +84,21 @@ function requiredText(value, field) {
   const text = String(value ?? "").trim();
   if (!text) throw new Error(`${field} is required`);
   return text;
+}
+
+function normalizeWebhookUrl(value, fallback = DEFAULT_KIMOOX_WEBHOOK_URL) {
+  const text = String(value ?? fallback).trim() || fallback;
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new PlatformStoreError("KIMOOX_WEBHOOK_URL_INVALID", "Kimoox Webhook 回调地址格式不正确");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname || parsed.pathname === "/") {
+    throw new PlatformStoreError("KIMOOX_WEBHOOK_URL_INVALID", "Kimoox Webhook 回调地址必须使用 http/https，并包含回调路径");
+  }
+  parsed.hash = "";
+  return parsed.toString();
 }
 
 function boolInt(value) {
@@ -186,7 +210,7 @@ function defaultCardProviderConfig(provider) {
   if (name === "kimoox") {
     return {
       provider: "kimoox",
-      base_url: "https://docs.kimoox.com",
+      base_url: "https://card.kimoox.com",
       api_key: "",
       api_secret_encrypted: "",
       webhook_secret_encrypted: "",
@@ -347,12 +371,14 @@ export class PlatformStore {
     const insert = this.db.prepare(`
       INSERT OR IGNORE INTO plan_configs(
         plan_type, display_name, enabled, payment_country, payment_currency,
-        checkout_template_key, checkout_proxy_group_id, direct_card_proxy_group_id,
+        checkout_template_key, card_source, checkout_proxy_group_id, direct_card_proxy_group_id,
         billing_group_id, failure_message, checkout_max_proxy_attempts, max_proxy_attempts_per_card,
-        vcc_target_balance_usd, kimoox_issue_mode, kimoox_card_bin_id, kimoox_card_type,
+        vcc_target_balance_usd, vcc_card_bin, vcc_open_email, remote_max_cards,
+        remote_success_withdraw, remote_success_final_action, remote_failure_withdraw, remote_failure_final_action,
+        kimoox_issue_mode, kimoox_card_bin_id, kimoox_card_type,
         kimoox_holder_id, kimoox_card_group_id, kimoox_budget_id, kimoox_reclaim_balance,
         kimoox_cancel_after_order, allow_card_switch, max_card_switches, created_at, updated_at
-      ) VALUES (?, ?, ?, '', '', '', 0, 0, 0, '', 4, 4, '', 'pool', '', 'PREPAID', '', '', '', 1, 1, 0, 0, ?, ?)
+      ) VALUES (?, ?, ?, '', '', '', 'local', 0, 0, 0, '', 4, 4, '', '', '', 1, 1, 'cancel', 1, 'cancel', 'pool', '', 'PREPAID', '', '', '', 1, 1, 0, 0, ?, ?)
     `);
     for (const [planType, displayName] of Object.entries(DEFAULT_PLAN_NAMES)) {
       insert.run(planType, displayName, 1, now, now);
@@ -364,18 +390,21 @@ export class PlatformStore {
     this.db.prepare(`
       INSERT INTO plan_configs(
         plan_type, display_name, enabled, payment_country, payment_currency,
-        checkout_template_key, checkout_proxy_group_id, direct_card_proxy_group_id,
+        checkout_template_key, card_source, checkout_proxy_group_id, direct_card_proxy_group_id,
         billing_group_id, failure_message, checkout_max_proxy_attempts, max_proxy_attempts_per_card,
-        vcc_target_balance_usd, kimoox_issue_mode, kimoox_card_bin_id, kimoox_card_type,
+        vcc_target_balance_usd, vcc_card_bin, vcc_open_email, remote_max_cards,
+        remote_success_withdraw, remote_success_final_action, remote_failure_withdraw, remote_failure_final_action,
+        kimoox_issue_mode, kimoox_card_bin_id, kimoox_card_type,
         kimoox_holder_id, kimoox_card_group_id, kimoox_budget_id, kimoox_reclaim_balance,
         kimoox_cancel_after_order, allow_card_switch, max_card_switches, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(plan_type) DO UPDATE SET
         display_name = excluded.display_name,
         enabled = excluded.enabled,
         payment_country = excluded.payment_country,
         payment_currency = excluded.payment_currency,
         checkout_template_key = excluded.checkout_template_key,
+        card_source = excluded.card_source,
         checkout_proxy_group_id = excluded.checkout_proxy_group_id,
         direct_card_proxy_group_id = excluded.direct_card_proxy_group_id,
         billing_group_id = excluded.billing_group_id,
@@ -383,6 +412,13 @@ export class PlatformStore {
         checkout_max_proxy_attempts = excluded.checkout_max_proxy_attempts,
         max_proxy_attempts_per_card = excluded.max_proxy_attempts_per_card,
         vcc_target_balance_usd = excluded.vcc_target_balance_usd,
+        vcc_card_bin = excluded.vcc_card_bin,
+        vcc_open_email = excluded.vcc_open_email,
+        remote_max_cards = excluded.remote_max_cards,
+        remote_success_withdraw = excluded.remote_success_withdraw,
+        remote_success_final_action = excluded.remote_success_final_action,
+        remote_failure_withdraw = excluded.remote_failure_withdraw,
+        remote_failure_final_action = excluded.remote_failure_final_action,
         kimoox_issue_mode = excluded.kimoox_issue_mode,
         kimoox_card_bin_id = excluded.kimoox_card_bin_id,
         kimoox_card_type = excluded.kimoox_card_type,
@@ -401,6 +437,7 @@ export class PlatformStore {
       config.payment_country,
       config.payment_currency,
       config.checkout_template_key,
+      config.card_source,
       config.checkout_proxy_group_id,
       config.direct_card_proxy_group_id,
       config.billing_group_id,
@@ -408,6 +445,13 @@ export class PlatformStore {
       config.checkout_max_proxy_attempts,
       config.max_proxy_attempts_per_card,
       config.vcc_target_balance_usd,
+      config.vcc_card_bin,
+      config.vcc_open_email,
+      config.remote_max_cards,
+      boolInt(config.remote_success_withdraw),
+      config.remote_success_final_action,
+      boolInt(config.remote_failure_withdraw),
+      config.remote_failure_final_action,
       config.kimoox_issue_mode,
       config.kimoox_card_bin_id,
       config.kimoox_card_type,
@@ -1653,7 +1697,8 @@ export class PlatformStore {
     if (normalizedProvider === "kimoox") {
       const result = {
         provider: "kimoox",
-        base_url: String(raw.base_url ?? "https://docs.kimoox.com"),
+        base_url: String(raw.base_url ?? "https://card.kimoox.com"),
+        webhook_url: normalizeWebhookUrl(raw.webhook_url ?? DEFAULT_KIMOOX_WEBHOOK_URL),
         api_key: String(raw.api_key ?? ""),
         api_secret_configured: Boolean(raw.api_secret_encrypted),
         webhook_secret_configured: Boolean(raw.webhook_secret_encrypted),
@@ -1690,7 +1735,8 @@ export class PlatformStore {
       const webhookSecretInput = input.webhook_secret ?? input.webhookSecret;
       const next = {
         provider: "kimoox",
-        base_url: String(input.base_url ?? input.baseUrl ?? current.base_url ?? "https://docs.kimoox.com").trim() || "https://docs.kimoox.com",
+        base_url: String(input.base_url ?? input.baseUrl ?? current.base_url ?? "https://card.kimoox.com").trim() || "https://card.kimoox.com",
+        webhook_url: normalizeWebhookUrl(input.webhook_url ?? input.webhookUrl ?? current.webhook_url ?? DEFAULT_KIMOOX_WEBHOOK_URL),
         api_key: String(input.api_key ?? input.apiKey ?? current.api_key ?? "").trim(),
         api_secret_encrypted: apiSecretInput !== undefined && String(apiSecretInput ?? "").trim()
           ? encryptSecret(String(apiSecretInput).trim(), this.secretKey)
@@ -2087,6 +2133,39 @@ export class PlatformStore {
       recent_orders: this.listOrders({ limit: 8 }),
       recent_logs: this.listRecentRunLogs(80),
     };
+  }
+
+  insertWebhookEvent(input = {}, now = nowSeconds()) {
+    const payload = input.payload && typeof input.payload === "object" ? input.payload : {};
+    const data = payload.data && typeof payload.data === "object" ? payload.data : {};
+    const result = this.db.prepare(`
+      INSERT OR IGNORE INTO webhook_events(
+        provider, event_id, event_type, event_category, event_time, merchant_id,
+        request_no, provider_card_id, payload_json, received_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      String(input.provider ?? "kimoox"),
+      String(input.event_id ?? input.eventId ?? payload.eventId ?? ""),
+      String(input.event_type ?? input.eventType ?? payload.eventType ?? ""),
+      String(payload.eventCategory ?? ""),
+      String(payload.eventTime ?? ""),
+      String(payload.merchantId ?? ""),
+      String(data.requestNo ?? data.request_no ?? ""),
+      String(data.cardId ?? data.providerCardId ?? ""),
+      JSON.stringify(payload),
+      Number(now),
+    );
+    const row = this.db.prepare("SELECT * FROM webhook_events WHERE provider = ? AND event_id = ?")
+      .get(String(input.provider ?? "kimoox"), String(input.event_id ?? input.eventId ?? payload.eventId ?? ""));
+    return { inserted: Number(result.changes) > 0, event: row };
+  }
+
+  listWebhookEvents(input = {}) {
+    const provider = String(input.provider ?? "").trim();
+    const limit = Math.max(1, Math.min(1000, Number(input.limit ?? 100)));
+    return provider
+      ? this.db.prepare("SELECT * FROM webhook_events WHERE provider = ? ORDER BY id DESC LIMIT ?").all(provider, limit)
+      : this.db.prepare("SELECT * FROM webhook_events ORDER BY id DESC LIMIT ?").all(limit);
   }
 
   insertAuditLog(audit) {

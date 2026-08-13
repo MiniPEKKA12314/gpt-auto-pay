@@ -44,13 +44,14 @@ export function normalizeRetryPolicy(plan = {}) {
     1000,
     "max_proxy_attempts_per_card",
   );
-  const allowCardSwitch = toBoolean(plan.allow_card_switch ?? plan.allowCardSwitch, false);
+  const remoteSource = ["vcc", "kimoox"].includes(String(plan.card_source ?? plan.cardSource ?? "").toLowerCase());
+  const allowCardSwitch = remoteSource ? true : toBoolean(plan.allow_card_switch ?? plan.allowCardSwitch, false);
   const maxCardSwitches = toInteger(
-    plan.max_card_switches ?? plan.maxCardSwitches,
+    remoteSource ? Math.max(0, Number(plan.remote_max_cards ?? plan.remoteMaxCards ?? 1) - 1) : (plan.max_card_switches ?? plan.maxCardSwitches),
     0,
     0,
     1000,
-    "max_card_switches",
+    remoteSource ? "remote_max_cards" : "max_card_switches",
   );
   return {
     checkout_max_proxy_attempts: checkoutMaxProxyAttempts,

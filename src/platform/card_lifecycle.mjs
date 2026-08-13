@@ -28,6 +28,18 @@ function cardProviderLabel(provider) {
   return provider === "kimoox" ? "Kimoox" : provider === "vcc" ? "VCC" : String(provider || "远程卡台").toUpperCase();
 }
 
+export function planCardSource(plan = {}) {
+  const source = String(plan.card_source ?? plan.cardSource ?? "").trim().toLowerCase();
+  if (["local", "vcc", "kimoox"].includes(source)) return source;
+  if (String(plan.kimoox_issue_mode ?? plan.kimooxIssueMode ?? "").toLowerCase() === "per_order") return "kimoox";
+  return "local";
+}
+
+function planUsesRemotePerOrder(plan = {}, provider = "") {
+  const source = planCardSource(plan);
+  return provider ? source === provider : ["vcc", "kimoox"].includes(source);
+}
+
 function hasRemoteTarget(card = {}) {
   const provider = cardProviderName(card);
   return ["vcc", "kimoox"].includes(provider)
@@ -311,6 +323,18 @@ function firstPlanCardGroupId(plan = {}) {
   return Number(first?.card_group_id ?? first?.id ?? 0);
 }
 
+function perOrderCardGroupId(plan = {}, providerName = "") {
+  if (providerName === "kimoox") {
+    const remoteGroup = Number(plan.kimoox_local_card_group_id ?? plan.kimooxLocalCardGroupId ?? 0);
+    if (remoteGroup > 0) return remoteGroup;
+  }
+  if (providerName === "vcc") {
+    const remoteGroup = Number(plan.vcc_local_card_group_id ?? plan.vccLocalCardGroupId ?? 0);
+    if (remoteGroup > 0) return remoteGroup;
+  }
+  return firstPlanCardGroupId(plan);
+}
+
 function successApplyStatus(detail = {}) {
   const values = [detail.applyStatus, detail.apply_status, detail.taskStatus, detail.task_status, detail.status]
     .map((value) => String(value ?? "").trim().toUpperCase())
@@ -412,7 +436,124 @@ async function waitForKimooxAppliedCard(provider, applyResult, plan, emit, optio
 }
 
 export function planUsesKimooxPerOrder(plan = {}) {
-  return String(plan.kimoox_issue_mode ?? plan.kimooxIssueMode ?? "pool").toLowerCase() === "per_order";
+  return planCardSource(plan) === "kimoox" || String(plan.kimoox_issue_mode ?? plan.kimooxIssueMode ?? "pool").toLowerCase() === "per_order";
+}
+
+export function planUsesVccPerOrder(plan = {}) {
+  return planCardSource(plan) === "vcc";
+}
+
+export async function prepareVccPerOrderCard(context = {}) {
+  const { store, order = {}, plan = {}, emit = () => {}, now = () => Date.now() / 1000 } = context;
+  if (!store) throw new PlatformStoreError("VCC_STORE_MISSING", "store is required");
+  if (!planUsesVccPerOrder(plan)) return { skipped: true, reason: "vcc_per_order_disabled" };
+  const localCardGroupId = perOrderCardGroupId(plan, "vcc");
+  if (!localCardGroupId) throw new PlatformStoreError("VCC_LOCAL_CARD_GROUP_REQUIRED", "VCC 每单开卡需要在套餐里选择一个本地卡组，用于临时保存新卡");
+  const targetCents = planTargetBalanceCents(plan);
+  if (targetCents === null || targetCents <= 0) throw new PlatformStoreError("VCC_TARGET_BALANCE_REQUIRED", "VCC 每单开卡需要在套餐里设置远程卡目标余额（USD）");
+  const cardBin = String(plan.vcc_card_bin ?? plan.vccCardBin ?? "").trim();
+  if (!cardBin) throw new PlatformStoreError("VCC_CARD_BIN_REQUIRED", "VCC 每单开卡需要在套餐里选择或填写开卡 BIN");
+
+  const existingCardId = Number(context.retryRuntime?.vccPerOrderCardId ?? context.retry_runtime?.vccPerOrderCardId ?? 0);
+  if (existingCardId > 0) {
+    try {
+      const existing = store.getCardById(existingCardId, { includeSecret: true });
+      if (!existing.deleted_at && cardProviderName(existing) === "vcc" && existing.provider_card_id) {
+        emit({ level: "info", stage: "vcc_open_card", message: `复用本订单已开的 VCC 卡: ${existing.masked_number} / ${existing.provider_card_id}`, meta: { local_card_id: existing.id, provider_card_id: existing.provider_card_id } });
+        return { ok: true, reused: true, card: existing, local_card_id: existing.id, provider_card_id: existing.provider_card_id };
+      }
+    } catch {}
+  }
+
+  const provider = createCardLifecycleProvider(store, context)("vcc");
+  const amount = centsToUsd(targetCents);
+  const requestNo = operationRequestNo("VO", order, { provider_card_id: context.attemptId ?? Date.now() });
+  const payload = { cardBin, amount, email: plan.vcc_open_email ?? plan.vccOpenEmail ?? "", remark: `order ${order.order_no || order.id || ""}`.trim().slice(0, 40) };
+  emit({ level: "info", stage: "vcc_open_card", message: `VCC 每单开卡开始: BIN=${cardBin} 金额=${amount} USD`, meta: { requestNo, payload: { ...payload, email: payload.email ? "provided" : "" } } });
+  const opened = await provider.openCard(payload);
+  emit({ level: "info", stage: "vcc_open_card", message: "VCC 开卡请求已提交", meta: { result: opened } });
+
+  let remote = normalizeOpenedRemoteCard(opened, "vcc");
+  const openId = extractRechargeId(opened);
+  const timeoutMs = Number(context.vccOpenTimeoutMs ?? DEFAULT_BALANCE_TIMEOUT_MS);
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  while ((!remote.number || !remote.provider_card_id) && Date.now() < deadline) {
+    try {
+      if (openId && typeof provider.getOpenCardDetail === "function") {
+        const detail = await provider.getOpenCardDetail({ orderId: openId, order_id: openId });
+        emit({ level: "info", stage: "vcc_open_card", message: `VCC 开卡详情已返回: ${openId}`, meta: { detail } });
+        remote = normalizeOpenedRemoteCard(detail, "vcc");
+      }
+      if ((!remote.number || !remote.provider_card_id) && typeof provider.listCards === "function") {
+        const rows = await provider.listCards({ pageNumber: 1, pageSize: 10, all: true });
+        const candidate = rows.find((row) => row.number && row.exp_month && row.exp_year && row.cvc && row.provider_card_id) || rows[0];
+        if (candidate) remote = normalizeOpenedRemoteCard(candidate, "vcc");
+      }
+    } catch (error) {
+      emit({ level: "warn", stage: "vcc_open_card", message: `VCC 查询新卡暂未成功: ${error.message || error}` });
+    }
+    if (remote.number && remote.provider_card_id) break;
+    await sleep(Math.min(BALANCE_POLL_INTERVAL_MS, Math.max(250, deadline - Date.now())));
+  }
+  if (!remote.number || !remote.provider_card_id) throw new PlatformStoreError("VCC_OPEN_CARD_TIMEOUT", `VCC 开卡 ${Math.round(timeoutMs / 1000)} 秒内未拿到可用卡号`, { opened, remote });
+
+  const cardId = store.createCard({
+    card_group_id: localCardGroupId,
+    number: remote.number, exp_month: remote.exp_month, exp_year: remote.exp_year, cvc: remote.cvc,
+    priority: 0, max_success_count: 1, provider: "vcc", provider_card_id: remote.provider_card_id,
+    auto_unfreeze_before_use: 0, auto_freeze_after_success: 0, auto_freeze_after_failure: 0, status: "enabled",
+    note: `vcc-per-order ${order.order_no || order.id || ""} ${requestNo}`.trim(),
+  }, now());
+  if (context.attemptId && typeof store.updateOrderAttemptResources === "function") store.updateOrderAttemptResources(context.attemptId, { card_id: cardId }, now());
+  const card = store.getCardById(cardId, { includeSecret: true });
+  if (context.retryRuntime && typeof context.retryRuntime === "object") {
+    context.retryRuntime.vccPerOrderCardId = cardId;
+    context.retryRuntime.vccProviderCardId = remote.provider_card_id;
+    context.retryRuntime.vccOpenOrderId = openId;
+  }
+  emit({ level: "success", stage: "vcc_open_card", message: `VCC 新卡已入本地临时卡池: ${card.masked_number} / ${remote.provider_card_id}`, meta: { local_card_id: cardId, provider_card_id: remote.provider_card_id, open_id: openId } });
+  return { ok: true, card, local_card_id: cardId, provider_card_id: remote.provider_card_id, openResult: opened };
+}
+
+function normalizeOpenedRemoteCard(value = {}, providerName = "") {
+  const card = normalizeRemoteCardDeep(value);
+  return {
+    provider: providerName,
+    provider_card_id: String(card.provider_card_id || card.providerCardId || card.cardId || card.userBankCardId || card.bankCardId || card.id || ""),
+    number: String(card.number || card.cardNumber || card.cardNo || card.userBankNum || "").replace(/\s+/g, ""),
+    exp_month: String(card.exp_month || card.expMonth || card.expiry?.exp_month || "").padStart(2, "0"),
+    exp_year: String(card.exp_year || card.expYear || card.expiry?.exp_year || ""),
+    cvc: String(card.cvc || card.cvv || ""),
+    masked_number: card.masked_number || card.maskedNumber || "",
+  };
+}
+
+function normalizeRemoteCardDeep(value, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return {};
+  seen.add(value);
+  const expiryText = String(value.expiryDate ?? value.expiry_date ?? value.expiry ?? "").trim();
+  const expiryMatch = expiryText.match(/^(\d{1,2})\s*[/\-]\s*(\d{2,4})$/);
+  const direct = {
+    provider_card_id: value.provider_card_id ?? value.providerCardId ?? value.cardId ?? value.userBankCardId ?? value.bankCardId ?? value.id,
+    number: value.number ?? value.cardNumber ?? value.cardNo ?? value.userBankNum,
+    exp_month: value.exp_month ?? value.expMonth ?? (expiryMatch ? expiryMatch[1].padStart(2, "0") : ""),
+    exp_year: value.exp_year ?? value.expYear ?? (expiryMatch ? (expiryMatch[2].length === 2 ? String(2000 + Number(expiryMatch[2])) : expiryMatch[2]) : ""),
+    cvc: value.cvc ?? value.cvv,
+    masked_number: value.masked_number ?? value.maskedNumber,
+  };
+  if (direct.number || direct.provider_card_id) return direct;
+  for (const item of Object.values(value)) {
+    if (Array.isArray(item)) {
+      for (const row of item) {
+        const found = normalizeRemoteCardDeep(row, seen);
+        if (found.number || found.provider_card_id) return found;
+      }
+    } else if (item && typeof item === "object") {
+      const found = normalizeRemoteCardDeep(item, seen);
+      if (found.number || found.provider_card_id) return found;
+    }
+  }
+  return {};
 }
 
 export async function prepareKimooxPerOrderCard(context = {}) {
@@ -420,7 +561,7 @@ export async function prepareKimooxPerOrderCard(context = {}) {
   if (!store) throw new PlatformStoreError("KIMOOX_STORE_MISSING", "store is required");
   if (!planUsesKimooxPerOrder(plan)) return { skipped: true, reason: "kimoox_per_order_disabled" };
 
-  const localCardGroupId = firstPlanCardGroupId(plan);
+  const localCardGroupId = perOrderCardGroupId(plan, "kimoox");
   if (!localCardGroupId) {
     throw new PlatformStoreError("KIMOOX_LOCAL_CARD_GROUP_REQUIRED", "Kimoox 按订单开卡需要在套餐里选择一个本地卡组，用于临时保存新卡");
   }
@@ -514,9 +655,10 @@ export async function prepareKimooxPerOrderCard(context = {}) {
 
 export async function cleanupKimooxPerOrderCard(context = {}) {
   const { store, card, plan = {}, emit = () => {}, now = () => Date.now() / 1000 } = context;
-  if (!store || !card || cardProviderName(card) !== "kimoox" || !planUsesKimooxPerOrder(plan)) return { skipped: true, reason: "not_kimoox_per_order_card" };
+  const source = planCardSource(plan);
+  if (!store || !card || !["vcc", "kimoox"].includes(cardProviderName(card)) || !planUsesRemotePerOrder(plan, cardProviderName(card))) return { skipped: true, reason: "not_remote_per_order_card" };
   const providerFactory = createCardLifecycleProvider(store, context);
-  const provider = providerFactory("kimoox");
+  const provider = providerFactory(cardProviderName(card));
   const target = targetFromCard(card);
   const display = displayCardTarget(card, target);
   const timeoutMs = operationTimeoutMs(context, plan);
@@ -532,9 +674,17 @@ export async function cleanupKimooxPerOrderCard(context = {}) {
     errors: [],
   };
 
-  emit({ level: "info", stage: "kimoox_cleanup", message: `Kimoox 订单临时卡收尾开始: ${display}` });
+  emit({ level: "info", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 订单临时卡收尾开始: ${display}` });
   let withdrawConfirmed = true;
-  if (enabled(plan.kimoox_reclaim_balance ?? plan.kimooxReclaimBalance ?? true)) {
+  const successLike = context.success === true || context.orderSucceeded === true || context.directResult?.ok === true || context.directResult?.status === "success";
+  const withdrawEnabled = successLike
+    ? enabled(plan.remote_success_withdraw ?? plan.remoteSuccessWithdraw ?? plan.kimoox_reclaim_balance ?? plan.kimooxReclaimBalance ?? true)
+    : enabled(plan.remote_failure_withdraw ?? plan.remoteFailureWithdraw ?? plan.kimoox_reclaim_balance ?? plan.kimooxReclaimBalance ?? true);
+  const finalAction = successLike
+    ? String(plan.remote_success_final_action ?? plan.remoteSuccessFinalAction ?? (enabled(plan.kimoox_cancel_after_order ?? plan.kimooxCancelAfterOrder ?? true) ? "cancel" : "keep")).toLowerCase()
+    : String(plan.remote_failure_final_action ?? plan.remoteFailureFinalAction ?? (enabled(plan.kimoox_cancel_after_order ?? plan.kimooxCancelAfterOrder ?? true) ? "cancel" : "keep")).toLowerCase();
+
+  if (withdrawEnabled) {
     try {
       const balance = await queryRemoteBalanceWithProvider(provider, card);
       result.balance = balance;
@@ -542,38 +692,55 @@ export async function cleanupKimooxPerOrderCard(context = {}) {
         const amount = balance.balance_usd;
         const requestNo = operationRequestNo("CW", context.order ?? {}, card);
         result.cash_out = await provider.cashOutCard({ cardId: target.cardId, amount, requestNo });
-        emit({ level: "info", stage: "kimoox_cleanup", message: `Kimoox 剩余余额转出请求已提交: ${amount} USD requestNo=${requestNo}`, meta: { amount, requestNo, result: result.cash_out } });
+        emit({ level: "info", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 剩余余额转出请求已提交: ${amount} USD requestNo=${requestNo}`, meta: { amount, requestNo, result: result.cash_out } });
         result.cash_out_confirm = await waitForKimooxBalanceAtMost(provider, card, 0, emit, { timeoutMs, requestNo, amount });
       } else {
-        emit({ level: "success", stage: "kimoox_cleanup", message: "Kimoox 卡余额为 0，余额转出确认完成", meta: balance });
+        emit({ level: "success", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 卡余额为 0，余额转出确认完成`, meta: balance });
       }
     } catch (error) {
       withdrawConfirmed = false;
       result.ok = false;
       result.errors.push(error.message || String(error));
-      emit({ level: "error", stage: "kimoox_cleanup", message: `Kimoox 剩余余额转出未确认完成: ${error.message || error}` });
+      emit({ level: "error", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 剩余余额转出未确认完成: ${error.message || error}` });
     }
   }
 
-  if (enabled(plan.kimoox_cancel_after_order ?? plan.kimooxCancelAfterOrder ?? true)) {
+  if (finalAction === "keep") {
+    emit({ level: "warn", stage: "kimoox_cleanup", message: "远程临时卡按套餐配置保留，未冻结/销卡；请管理员后续核对" });
+    return result;
+  }
+  if (finalAction === "freeze") {
+    try {
+      const requestNo = operationRequestNo("CFZ", context.order ?? {}, card);
+      result.freeze = await provider.suspendCard({ cardId: target.cardId, requestNo });
+      emit({ level: "success", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 临时卡冻结完成 requestNo=${requestNo}`, meta: { requestNo, result: result.freeze } });
+    } catch (error) {
+      result.ok = false;
+      result.errors.push(error.message || String(error));
+      emit({ level: "error", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 临时卡冻结失败: ${error.message || error}` });
+    }
+    return result;
+  }
+
+  if (finalAction === "cancel") {
     if (!withdrawConfirmed) {
-      emit({ level: "warn", stage: "kimoox_cleanup", message: "Kimoox 余额转出未确认完成，已跳过自动销卡；远程卡和本地卡记录保留，需管理员核对" });
+      emit({ level: "warn", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 余额转出未确认完成，已跳过自动销卡；远程卡和本地卡记录保留，需管理员核对` });
       return result;
     }
     try {
       const requestNo = operationRequestNo("CC", context.order ?? {}, card);
       result.cancel = await provider.cancelCard({ cardId: target.cardId, requestNo });
-      emit({ level: "info", stage: "kimoox_cleanup", message: `Kimoox 销卡请求已提交 requestNo=${requestNo}`, meta: { requestNo, result: result.cancel } });
-      result.cancel_confirm = await waitForKimooxCancelConfirmed(provider, card, emit, { timeoutMs, requestNo });
+      emit({ level: "info", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 销卡请求已提交 requestNo=${requestNo}`, meta: { requestNo, result: result.cancel } });
+      result.cancel_confirm = source === "kimoox" ? await waitForKimooxCancelConfirmed(provider, card, emit, { timeoutMs, requestNo }) : { ok: true, confirmed: true, provider: source };
       if (card.id) {
-        store.softDeleteCard(card.id, 1, "kimoox_per_order_cleaned", now());
+        store.softDeleteCard(card.id, 1, `${source}_per_order_cleaned`, now());
         result.local_deleted = true;
-        emit({ level: "success", stage: "kimoox_cleanup", message: "Kimoox 销卡已确认，本地临时卡记录已软删除", meta: { requestNo, confirm: result.cancel_confirm } });
+        emit({ level: "success", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 销卡请求完成，本地临时卡记录已软删除`, meta: { requestNo, confirm: result.cancel_confirm } });
       }
     } catch (error) {
       result.ok = false;
       result.errors.push(error.message || String(error));
-      emit({ level: "error", stage: "kimoox_cleanup", message: `Kimoox 销卡未确认完成: ${error.message || error}` });
+      emit({ level: "error", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 销卡未确认完成: ${error.message || error}` });
     }
   }
   return result;

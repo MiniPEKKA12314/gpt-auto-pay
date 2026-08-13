@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHmac, createHash, randomBytes }
 
 import { maskCardNumber } from "./crypto.mjs";
 
-const DEFAULT_BASE_URL = "https://docs.kimoox.com";
+const DEFAULT_BASE_URL = "https://card.kimoox.com";
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 function requiredText(value, field) {

@@ -646,18 +646,24 @@ export function renderAdminUi(options = {}) {
               <div><label>账单组</label><select id="planBillingGroup" name="billing_group_id"></select></div>
               <div><label>提链代理尝试</label><input id="planCheckoutMaxProxy" name="checkout_max_proxy_attempts" type="number" min="1" max="1000"></div>
               <div><label>直卡每张卡代理尝试</label><input id="planMaxProxy" name="max_proxy_attempts_per_card" type="number" min="1" max="1000"></div>
-              <div><label>远程卡目标余额（USD）</label><input id="planVccTargetBalanceUsd" name="vcc_target_balance_usd" inputmode="decimal" placeholder="例如 25.00；VCC/Kimoox 远程卡生效，留空不自动补余额"></div>
-              <div><label>Kimoox 发卡模式</label><select id="planKimooxIssueMode" name="kimoox_issue_mode"><option value="pool">使用已导入卡池</option><option value="per_order">每笔订单新开卡</option></select></div>
-              <div><label>Kimoox BIN ID</label><input id="planKimooxCardBinId" name="kimoox_card_bin_id" placeholder="每笔订单新开卡时必填"></div>
-              <div><label>Kimoox 卡类型</label><select id="planKimooxCardType" name="kimoox_card_type"><option value="PREPAID">PREPAID 储值卡</option><option value="BUDGET">BUDGET 预算卡</option></select></div>
-              <div><label>Kimoox 持卡人 ID</label><input id="planKimooxHolderId" name="kimoox_holder_id" placeholder="可留空用卡台默认"></div>
-              <div><label>Kimoox 远端卡组 ID</label><input id="planKimooxCardGroupId" name="kimoox_card_group_id" placeholder="预算卡按卡台要求填写"></div>
-              <div><label>Kimoox 预算组 ID</label><input id="planKimooxBudgetId" name="kimoox_budget_id" placeholder="预算卡按卡台要求填写"></div>
-              <div class="full"><label>Kimoox 订单临时卡收尾</label><div class="check-list"><label><input id="planKimooxReclaimBalance" type="checkbox" value="1" checked> 支付结束后转出剩余余额</label><label><input id="planKimooxCancelAfterOrder" type="checkbox" value="1" checked> 支付结束后销毁卡片</label></div></div>
-              <div><label>允许换卡</label><select id="planAllowSwitch" name="allow_card_switch"><option value="0">关闭</option><option value="1">开启</option></select></div>
-              <div><label>最多换卡数</label><input id="planMaxSwitches" name="max_card_switches" type="number" min="0" max="1000"></div>
+              <div><label>支付方式</label><select id="planCardSource" name="card_source"><option value="local">本地卡组</option><option value="vcc">VCC 每单新开卡</option><option value="kimoox">Kimoox 每单新开卡</option></select></div>
+              <div class="plan-local-field full"><label>本地卡组</label><div id="planCardGroupsList" class="check-list"></div></div>
+              <div class="plan-remote-field"><label>远程卡目标余额（USD）</label><input id="planVccTargetBalanceUsd" name="vcc_target_balance_usd" inputmode="decimal" placeholder="例如 25.00；远程卡开卡/补余额生效，全部按 USD"></div>
+              <div class="plan-remote-field"><label>本订单最多开卡数</label><input id="planRemoteMaxCards" name="remote_max_cards" type="number" min="1" max="1000" placeholder="例如 2"></div>
+              <div class="plan-vcc-field"><label>VCC 开卡 BIN</label><input id="planVccCardBin" name="vcc_card_bin" placeholder="点击卡池里的 VCC 拉取 BIN 后填入"></div>
+              <div class="plan-vcc-field"><label>VCC 开卡邮箱</label><input id="planVccOpenEmail" name="vcc_open_email" placeholder="可留空"></div>
+              <div class="plan-kimoox-field"><label>Kimoox BIN ID</label><input id="planKimooxCardBinId" name="kimoox_card_bin_id" placeholder="点击卡池里的 Kimoox 拉取 BIN 后填入"></div>
+              <div class="plan-kimoox-field"><label>Kimoox 卡类型</label><select id="planKimooxCardType" name="kimoox_card_type"><option value="PREPAID">PREPAID 储值卡</option><option value="BUDGET">BUDGET 预算卡</option></select></div>
+              <div class="plan-kimoox-field"><label>Kimoox 持卡人 ID</label><input id="planKimooxHolderId" name="kimoox_holder_id" placeholder="可留空用卡台默认"></div>
+              <div class="plan-kimoox-field"><label>Kimoox 远端卡组 ID</label><input id="planKimooxCardGroupId" name="kimoox_card_group_id" placeholder="预算卡按卡台要求填写"></div>
+              <div class="plan-kimoox-field"><label>Kimoox 预算组 ID</label><input id="planKimooxBudgetId" name="kimoox_budget_id" placeholder="预算卡按卡台要求填写"></div>
+              <div class="plan-remote-field"><label>成功后转出余额</label><select id="planRemoteSuccessWithdraw" name="remote_success_withdraw"><option value="1">开启</option><option value="0">关闭</option></select></div>
+              <div class="plan-remote-field"><label>成功后卡片处理</label><select id="planRemoteSuccessFinalAction" name="remote_success_final_action"><option value="cancel">销卡</option><option value="freeze">冻结</option><option value="keep">保留</option></select></div>
+              <div class="plan-remote-field"><label>失败后转出余额</label><select id="planRemoteFailureWithdraw" name="remote_failure_withdraw"><option value="1">开启</option><option value="0">关闭</option></select></div>
+              <div class="plan-remote-field"><label>失败后卡片处理</label><select id="planRemoteFailureFinalAction" name="remote_failure_final_action"><option value="cancel">销卡</option><option value="freeze">冻结</option><option value="keep">保留</option></select></div>
+              <div class="plan-local-field"><label>允许换卡</label><select id="planAllowSwitch" name="allow_card_switch"><option value="0">关闭</option><option value="1">开启</option></select></div>
+              <div class="plan-local-field"><label>最多换卡数</label><input id="planMaxSwitches" name="max_card_switches" type="number" min="0" max="1000"></div>
               <div class="full"><label>失败提示</label><input id="planFailureMessage" name="failure_message"></div>
-              <div class="full"><label>使用卡组</label><div id="planCardGroupsList" class="check-list"></div></div>
               <div class="full row"><label style="margin:0"><input id="planEnabled" type="checkbox" style="width:auto;height:auto" checked> 启用套餐</label><button class="primary" type="submit">保存套餐</button><button id="checkReadinessBtn" type="button">检查运行条件</button></div>
             </form>
             <pre id="planOutput"></pre>
@@ -697,10 +703,11 @@ export function renderAdminUi(options = {}) {
           <section>
             <h2>Kimoox 卡台</h2>
             <form id="kimooxConfigForm" class="form-grid">
-              <div><label>接口地址</label><input id="kimooxBaseUrl" name="base_url" placeholder="https://api.kimoox.com"></div>
+              <div><label>接口地址</label><input id="kimooxBaseUrl" name="base_url" placeholder="https://card.kimoox.com"></div>
               <div><label>API Key</label><input id="kimooxApiKey" name="api_key"></div>
               <div><label>API Secret</label><input id="kimooxApiSecret" name="api_secret" type="password" placeholder="留空则不修改"></div>
               <div><label>Webhook Secret</label><input id="kimooxWebhookSecret" name="webhook_secret" type="password" placeholder="导入卡三要素解密需要；留空则不修改"></div>
+              <div class="full"><label>Webhook 回调地址</label><div class="row"><input id="kimooxWebhookUrl" name="webhook_url" placeholder="https://minipekka.ayuekp.store/api/webhooks/kimoox"><button id="kimooxCopyWebhookUrlBtn" type="button">复制地址</button></div></div>
               <div><label>超时 ms</label><input id="kimooxTimeoutMs" name="timeout_ms" type="number" min="1000" max="120000" value="15000"></div>
               <div class="full row">
                 <button class="primary" type="submit">保存 Kimoox 配置</button>
@@ -1033,6 +1040,8 @@ export function renderAdminUi(options = {}) {
       openOrderDetailId: 0,
       planFormDirty: false,
       selectedPlanType: "",
+      lastVccBins: [],
+      lastKimooxBins: [],
       orderDetailPlainText: ""
     };
 
@@ -1336,7 +1345,7 @@ export function renderAdminUi(options = {}) {
       const rows = selectedCodeRows();
       if ($("selectedCodeCount")) $("selectedCodeCount").value = String(rows.length);
       if ($("selectedCodesExport")) {
-        $("selectedCodesExport").value = rows.map(function(code) { return code.code_display; }).join("\\n");
+        $("selectedCodesExport").value = rows.map(function(code) { return code.code_display; }).join("\\\\n");
       }
     }
 
@@ -1874,15 +1883,20 @@ export function renderAdminUi(options = {}) {
       $("planBillingGroup").value = String(plan.billing_group_id || 0);
       $("planCheckoutMaxProxy").value = plan.checkout_max_proxy_attempts || 4;
       $("planMaxProxy").value = plan.max_proxy_attempts_per_card || 4;
+      $("planCardSource").value = plan.card_source || (plan.kimoox_issue_mode === "per_order" ? "kimoox" : "local");
       $("planVccTargetBalanceUsd").value = plan.vcc_target_balance_usd || "";
-      $("planKimooxIssueMode").value = plan.kimoox_issue_mode || "pool";
+      $("planRemoteMaxCards").value = plan.remote_max_cards || 1;
+      $("planVccCardBin").value = plan.vcc_card_bin || "";
+      $("planVccOpenEmail").value = plan.vcc_open_email || "";
+      $("planRemoteSuccessWithdraw").value = plan.remote_success_withdraw === 0 ? "0" : "1";
+      $("planRemoteSuccessFinalAction").value = plan.remote_success_final_action || "cancel";
+      $("planRemoteFailureWithdraw").value = plan.remote_failure_withdraw === 0 ? "0" : "1";
+      $("planRemoteFailureFinalAction").value = plan.remote_failure_final_action || "cancel";
       $("planKimooxCardBinId").value = plan.kimoox_card_bin_id || "";
       $("planKimooxCardType").value = plan.kimoox_card_type || "PREPAID";
       $("planKimooxHolderId").value = plan.kimoox_holder_id || "";
       $("planKimooxCardGroupId").value = plan.kimoox_card_group_id || "";
       $("planKimooxBudgetId").value = plan.kimoox_budget_id || "";
-      $("planKimooxReclaimBalance").checked = plan.kimoox_reclaim_balance !== 0;
-      $("planKimooxCancelAfterOrder").checked = plan.kimoox_cancel_after_order !== 0;
       $("planAllowSwitch").value = plan.allow_card_switch ? "1" : "0";
       $("planMaxSwitches").value = plan.max_card_switches || 0;
       $("planFailureMessage").value = plan.failure_message || "";
@@ -1891,10 +1905,20 @@ export function renderAdminUi(options = {}) {
       document.querySelectorAll("[data-plan-card-group]").forEach(function(input) {
         input.checked = selectedCardGroupIds.has(String(input.dataset.planCardGroup));
       });
+      syncPlanCardSourceFields();
+    }
+
+    function syncPlanCardSourceFields() {
+      const source = $("planCardSource") ? $("planCardSource").value : "local";
+      document.querySelectorAll(".plan-local-field").forEach(function(node) { node.hidden = source !== "local"; });
+      document.querySelectorAll(".plan-remote-field").forEach(function(node) { node.hidden = source === "local"; });
+      document.querySelectorAll(".plan-vcc-field").forEach(function(node) { node.hidden = source !== "vcc"; });
+      document.querySelectorAll(".plan-kimoox-field").forEach(function(node) { node.hidden = source !== "kimoox"; });
     }
 
     function renderPlans() {
       syncPlanForm();
+      syncPlanCardSourceFields();
     }
 
     function cardPolicyLabel(card) {
@@ -1968,12 +1992,13 @@ export function renderAdminUi(options = {}) {
 
     function renderKimooxConfig() {
       const config = state.kimooxConfig || {};
-      $("kimooxBaseUrl").value = config.base_url || "https://api.kimoox.com";
+      $("kimooxBaseUrl").value = config.base_url || "https://card.kimoox.com";
       $("kimooxApiKey").value = config.api_key || "";
       $("kimooxApiSecret").value = "";
       $("kimooxApiSecret").placeholder = config.api_secret_configured ? "已保存，留空则不修改" : "尚未保存";
       $("kimooxWebhookSecret").value = "";
       $("kimooxWebhookSecret").placeholder = config.webhook_secret_configured ? "已保存，留空则不修改" : "导入卡三要素解密需要";
+      $("kimooxWebhookUrl").value = config.webhook_url || "https://minipekka.ayuekp.store/api/webhooks/kimoox";
       $("kimooxTimeoutMs").value = config.timeout_ms || 15000;
     }
 
@@ -1997,15 +2022,15 @@ export function renderAdminUi(options = {}) {
 
     function confirmGroupDelete(kind) {
       const messages = {
-        card: "确认删除这个卡组？\\n该卡组下所有卡会一并删除。",
-        billing: "确认删除这个账单组？\\n该账单组下所有账单地址会一并删除。",
-        proxy: "确认删除这个代理组？\\n该代理组会从提链/直卡可选列表移除，组内代理配置会一并删除。"
+        card: "确认删除这个卡组？\\\\n该卡组下所有卡会一并删除。",
+        billing: "确认删除这个账单组？\\\\n该账单组下所有账单地址会一并删除。",
+        proxy: "确认删除这个代理组？\\\\n该代理组会从提链/直卡可选列表移除，组内代理配置会一并删除。"
       };
       return window.confirm(messages[kind] || "确认删除这个分组？");
     }
 
     function confirmOrderDelete(orderNo) {
-      return window.confirm("确认删除订单 " + (orderNo || "") + "？\\n删除后会从最近订单和订单列表隐藏，但审计与运行日志仍会保留。");
+      return window.confirm("确认删除订单 " + (orderNo || "") + "？\\\\n删除后会从最近订单和订单列表隐藏，但审计与运行日志仍会保留。");
     }
 
     function syncProxyProviderFields() {
@@ -2082,7 +2107,7 @@ export function renderAdminUi(options = {}) {
       const payload = formData(form);
       payload.quantity = numeric(payload.quantity, 1);
       const result = await api("/api/admin/redeem/batches", { method: "POST", body: JSON.stringify(payload) });
-      $("generatedCodes").value = result.data.codes.map(function(code) { return code.code_display; }).join("\\n");
+      $("generatedCodes").value = result.data.codes.map(function(code) { return code.code_display; }).join("\\\\n");
       replaceSelectedCodes(result.data.codes || []);
       showToast("兑换码已生成", "ok");
       await Promise.all([loadBatches(), loadCodes(), loadDashboard()]);
@@ -2157,15 +2182,23 @@ export function renderAdminUi(options = {}) {
         billing_group_id: numeric($("planBillingGroup").value, 0),
         checkout_max_proxy_attempts: numeric($("planCheckoutMaxProxy").value, 4),
         max_proxy_attempts_per_card: numeric($("planMaxProxy").value, 4),
+        card_source: $("planCardSource").value,
         vcc_target_balance_usd: $("planVccTargetBalanceUsd").value,
-        kimoox_issue_mode: $("planKimooxIssueMode").value,
+        vcc_card_bin: $("planVccCardBin").value,
+        vcc_open_email: $("planVccOpenEmail").value,
+        remote_max_cards: numeric($("planRemoteMaxCards").value, 1),
+        remote_success_withdraw: $("planRemoteSuccessWithdraw").value === "1",
+        remote_success_final_action: $("planRemoteSuccessFinalAction").value,
+        remote_failure_withdraw: $("planRemoteFailureWithdraw").value === "1",
+        remote_failure_final_action: $("planRemoteFailureFinalAction").value,
+        kimoox_issue_mode: $("planCardSource").value === "kimoox" ? "per_order" : "pool",
         kimoox_card_bin_id: $("planKimooxCardBinId").value,
         kimoox_card_type: $("planKimooxCardType").value,
         kimoox_holder_id: $("planKimooxHolderId").value,
         kimoox_card_group_id: $("planKimooxCardGroupId").value,
         kimoox_budget_id: $("planKimooxBudgetId").value,
-        kimoox_reclaim_balance: $("planKimooxReclaimBalance").checked,
-        kimoox_cancel_after_order: $("planKimooxCancelAfterOrder").checked,
+        kimoox_reclaim_balance: $("planRemoteSuccessWithdraw").value === "1" || $("planRemoteFailureWithdraw").value === "1",
+        kimoox_cancel_after_order: $("planRemoteSuccessFinalAction").value === "cancel" || $("planRemoteFailureFinalAction").value === "cancel",
         allow_card_switch: $("planAllowSwitch").value === "1",
         max_card_switches: numeric($("planMaxSwitches").value, 0),
         failure_message: $("planFailureMessage").value,
@@ -2274,9 +2307,21 @@ export function renderAdminUi(options = {}) {
       showToast("VCC 账号测试完成", "ok");
     }
 
+    function summarizeBinsForPlan(provider, rows) {
+      const list = Array.isArray(rows) ? rows : [];
+      if (provider === "vcc") state.lastVccBins = list;
+      if (provider === "kimoox") state.lastKimooxBins = list;
+      return list.slice(0, 30).map(function(row, index) {
+        const id = row.id || row.cardBin || row.bin || row.cardBinId || row.card_bin_id || "";
+        const label = row.name || row.title || row.cardType || row.type || row.organization || "";
+        return (index + 1) + ". " + id + (label ? " / " + label : "");
+      }).join("\\\\n");
+    }
+
     async function loadVccBins() {
       const result = await api("/api/admin/card-providers/vcc/bins");
-      $("vccOutput").textContent = JSON.stringify(result, null, 2);
+      const summary = summarizeBinsForPlan("vcc", result.choices || result.data);
+      $("vccOutput").textContent = JSON.stringify(result, null, 2) + (summary ? "\\n\\n可复制到套餐 VCC 开卡 BIN：\\n" + summary : "");
       showToast("VCC BIN 已拉取", "ok");
     }
 
@@ -2376,6 +2421,18 @@ export function renderAdminUi(options = {}) {
       showToast("Kimoox 配置已保存", "ok");
     }
 
+    async function copyKimooxWebhookUrl() {
+      const value = String($("kimooxWebhookUrl").value || "").trim();
+      if (!value) throw new Error("请先填写 Webhook 回调地址");
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        $("kimooxWebhookUrl").select();
+        document.execCommand("copy");
+      }
+      showToast("Webhook 回调地址已复制", "ok");
+    }
+
     async function kimooxAction(path, payload, method) {
       const result = await api(path, { method: method || "POST", body: JSON.stringify(payload || {}) });
       $("kimooxOutput").textContent = JSON.stringify(result, null, 2);
@@ -2400,7 +2457,8 @@ export function renderAdminUi(options = {}) {
 
     async function loadKimooxBins() {
       const result = await api("/api/admin/card-providers/kimoox/bins");
-      $("kimooxOutput").textContent = JSON.stringify(result, null, 2);
+      const summary = summarizeBinsForPlan("kimoox", result.choices || result.data);
+      $("kimooxOutput").textContent = JSON.stringify(result, null, 2) + (summary ? "\\n\\n可复制到套餐 Kimoox BIN ID：\\n" + summary : "");
       showToast("Kimoox BIN 已拉取", "ok");
     }
 
@@ -2575,7 +2633,7 @@ export function renderAdminUi(options = {}) {
         const raw = String(payload.api_config || "").trim();
         payload.config = raw ? JSON.parse(raw) : {};
       } else {
-        payload.config = { proxies: String(payload.proxies || "").split(/\\r?\\n/).map(function(line) { return line.trim(); }).filter(Boolean) };
+        payload.config = { proxies: String(payload.proxies || "").split(/\\r?\\\\n/).map(function(line) { return line.trim(); }).filter(Boolean) };
       }
       delete payload.id;
       delete payload.proxies;
@@ -2596,7 +2654,7 @@ export function renderAdminUi(options = {}) {
     function proxyEntriesToText(entries) {
       return (entries || []).map(function(entry) {
         return typeof entry === "string" ? entry : (entry.url || entry.proxy || "");
-      }).filter(Boolean).join("\\n");
+      }).filter(Boolean).join("\\\\n");
     }
 
     function fillProxyEditForm(group) {
@@ -2702,7 +2760,7 @@ export function renderAdminUi(options = {}) {
       fillCardSecretDialog(result.data || {}, cardId);
       const dialog = $("cardSecretDialog");
       if (dialog && typeof dialog.showModal === "function") dialog.showModal();
-      else window.alert("卡号: " + ((result.data || {}).number || "") + "\\n有效期: " + ((result.data || {}).exp_month || "") + "/" + ((result.data || {}).exp_year || "") + "\\nCVC: " + ((result.data || {}).cvc || ""));
+      else window.alert("卡号: " + ((result.data || {}).number || "") + "\\\\n有效期: " + ((result.data || {}).exp_month || "") + "/" + ((result.data || {}).exp_year || "") + "\\\\nCVC: " + ((result.data || {}).cvc || ""));
     }
 
     async function saveCardEdit() {
@@ -2902,6 +2960,7 @@ export function renderAdminUi(options = {}) {
     });
     $("planForm").addEventListener("change", function(event) {
       if (event.target && event.target.id !== "planSelect") state.planFormDirty = true;
+      if (event.target && event.target.id === "planCardSource") syncPlanCardSourceFields();
     });
     $("planSelect").addEventListener("change", function() {
       state.selectedPlanType = $("planSelect").value;
@@ -2917,6 +2976,7 @@ export function renderAdminUi(options = {}) {
     clickWithFeedback("cardUnfreezeBtn", "正在解冻远程卡...", function() { return manualCardRemoteAction($("cardUnfreezeBtn").dataset.cardId, "unfreeze"); }, "远程卡已解冻");
     $("kimooxConfigForm").addEventListener("submit", function(event) { submitWithFeedback(event, "正在保存 Kimoox 配置...", saveKimooxConfig); });
     clickWithFeedback("kimooxTestBtn", "正在查询 Kimoox 账户余额...", testKimooxProvider);
+    clickWithFeedback("kimooxCopyWebhookUrlBtn", "正在复制 Webhook 回调地址...", copyKimooxWebhookUrl);
     clickWithFeedback("kimooxBinsBtn", "正在拉取 Kimoox BIN...", loadKimooxBins);
     clickWithFeedback("kimooxRemoteCardsBtn", "正在拉取 Kimoox 远端卡...", loadKimooxRemoteCards);
     clickWithFeedback("kimooxImportBtn", "正在导入 Kimoox 远端卡...", importKimooxCards);

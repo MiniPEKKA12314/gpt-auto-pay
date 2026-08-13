@@ -1601,3 +1601,66 @@ test("admin Kimoox provider APIs save config, import decrypted cards, and manage
     await app.closeAll();
   }
 });
+
+test("Kimoox webhook verifies signatures, stores events idempotently, and returns ok", async () => {
+  const { kimooxWebhookSignature } = await import("../../src/platform/kimoox_webhook.mjs");
+  const app = await createTestApp();
+  const secret = "webhook-test-secret";
+  app.store.setCardProviderConfig("kimoox", {
+    base_url: "https://card.kimoox.test",
+    api_key: "ak",
+    api_secret: "sk",
+    webhook_secret: secret,
+  }, 1);
+  const payload = {
+    eventId: "evt_001",
+    eventType: "CARD_ISSUE.SUCCESS",
+    eventCategory: "CARD_ISSUE",
+    eventTime: "2026-08-13 22:00:00",
+    merchantId: 952487,
+    data: { requestNo: "KA001", cardId: "VC001" },
+  };
+  const rawBody = JSON.stringify(payload);
+  const timestamp = "1786630000000";
+  const nonce = "nonce001";
+  const signature = kimooxWebhookSignature({
+    eventId: payload.eventId,
+    eventType: payload.eventType,
+    timestamp,
+    nonce,
+    rawBody,
+    secret,
+  });
+  const headers = {
+    "content-type": "application/json",
+    "x-vcc-webhook-id": payload.eventId,
+    "x-vcc-webhook-event": payload.eventType,
+    "x-vcc-webhook-timestamp": timestamp,
+    "x-vcc-webhook-nonce": nonce,
+    "x-vcc-webhook-signature": `v1=${signature}`,
+  };
+  try {
+    const first = await fetch(`${app.url}/api/webhooks/kimoox`, { method: "POST", headers, body: rawBody });
+    assert.equal(first.status, 200);
+    assert.equal(await first.text(), "ok");
+    const duplicate = await fetch(`${app.url}/api/webhooks/kimoox`, { method: "POST", headers, body: rawBody });
+    assert.equal(duplicate.status, 200);
+    assert.equal(await duplicate.text(), "ok");
+    const events = app.store.listWebhookEvents({ provider: "kimoox" });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].event_id, payload.eventId);
+    assert.equal(events[0].request_no, "KA001");
+    assert.equal(events[0].provider_card_id, "VC001");
+
+    const rejected = await fetch(`${app.url}/api/webhooks/kimoox`, {
+      method: "POST",
+      headers: { ...headers, "x-vcc-webhook-signature": `v1=${"0".repeat(64)}` },
+      body: rawBody,
+    });
+    assert.equal(rejected.status, 401);
+    assert.match(await rejected.text(), /签名验证失败/);
+    assert.equal(app.store.listWebhookEvents({ provider: "kimoox" }).length, 1);
+  } finally {
+    await app.closeAll();
+  }
+});

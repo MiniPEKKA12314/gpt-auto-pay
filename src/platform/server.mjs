@@ -5,6 +5,7 @@ import { renderAdminUi } from "./admin_ui.mjs";
 import { createAuditLog } from "./audit.mjs";
 import { ADMIN_SESSION_COOKIE, buildAdminSessionCookie, clearAdminSessionCookie, verifyPassword } from "./auth.mjs";
 import { createKimooxCardProvider } from "./card_provider_kimoox.mjs";
+import { verifyKimooxWebhook } from "./kimoox_webhook.mjs";
 import { createVccCardProvider } from "./card_provider_vcc.mjs";
 import { renderDevUi } from "./dev_ui.mjs";
 import { PlatformStoreError } from "./db.mjs";
@@ -55,6 +56,17 @@ async function readJson(req) {
   }
 }
 
+async function readRawBody(req, maxBytes = 1024 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) throw new PlatformStoreError("PAYLOAD_TOO_LARGE", "请求正文超过限制");
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 function clientIp(req) {
   const cf = req.headers["cf-connecting-ip"];
   if (typeof cf === "string" && cf.trim()) return cf.trim();
@@ -91,6 +103,16 @@ function isAdminPath(pathname) {
 
 function isPublicOnlyBlockedPath(pathname) {
   return isAdminPath(pathname) || pathname === "/dev" || pathname.startsWith("/dev/");
+}
+
+function isConfiguredKimooxWebhook(req, url, config = {}) {
+  if (url.pathname === "/api/webhooks/kimoox") return true;
+  try {
+    const configured = new URL(String(config.webhook_url || ""));
+    return requestHost(req) === normalizeHostHeader(configured.host) && url.pathname === configured.pathname;
+  } catch {
+    return false;
+  }
 }
 
 function cookieDomainForHost(host, allowedHosts) {
@@ -282,6 +304,26 @@ function publicKimooxCard(card = {}) {
   return publicRemoteProviderCard(card, "kimoox");
 }
 
+function remoteBinId(row = {}) {
+  return String(row.id ?? row.cardBinId ?? row.card_bin_id ?? row.cardBin ?? row.bin ?? row.binNo ?? row.bin_no ?? "").trim();
+}
+
+function remoteBinLabel(row = {}) {
+  return [row.name, row.title, row.cardType, row.type, row.organization, row.currency, row.country]
+    .filter(Boolean)
+    .map((value) => String(value).trim())
+    .filter(Boolean)
+    .join(" / ");
+}
+
+function publicRemoteBin(row = {}) {
+  return {
+    id: remoteBinId(row),
+    label: remoteBinLabel(row),
+    raw: sanitizeVccOperationPayload(row),
+  };
+}
+
 function vccResultSummary(data = {}) {
   if (!data || typeof data !== "object") return data;
   return {
@@ -441,6 +483,29 @@ export function createPlatformRequestHandler(options = {}) {
       }
       if (req.method === "GET" && url.pathname === "/health") {
         sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      const kimooxWebhookConfig = req.method === "POST"
+        ? store.getCardProviderConfig("kimoox", { includeSecret: true })
+        : null;
+      if (req.method === "POST" && isConfiguredKimooxWebhook(req, url, kimooxWebhookConfig)) {
+        const config = kimooxWebhookConfig;
+        const rawBody = await readRawBody(req);
+        const verified = verifyKimooxWebhook({ headers: req.headers, rawBody, secret: config.webhook_secret });
+        if (!verified.ok) {
+          console.warn(`[kimoox-webhook] rejected ${verified.code}: ${verified.message}; ip=${ip}`);
+          sendText(res, verified.code === "WEBHOOK_SECRET_MISSING" ? 503 : 401, verified.message);
+          return;
+        }
+        const stored = store.insertWebhookEvent({
+          provider: "kimoox",
+          event_id: verified.eventId,
+          event_type: verified.eventType,
+          payload: verified.payload,
+        });
+        console.log(`[kimoox-webhook] ${stored.inserted ? "received" : "duplicate"} ${verified.eventType} ${verified.eventId}`);
+        sendText(res, 200, "ok");
         return;
       }
 
@@ -1163,7 +1228,8 @@ export function createPlatformRequestHandler(options = {}) {
       if (req.method === "GET" && url.pathname === "/api/admin/card-providers/vcc/bins") {
         if (!requireAdmin(req, res, adminToken, url)) return;
         const provider = createVccProviderFromStore(store, fetchImpl);
-        sendJson(res, 200, { ok: true, data: await provider.listBins() });
+        const bins = await provider.listBins();
+        sendJson(res, 200, { ok: true, data: bins, choices: bins.map(publicRemoteBin) });
         return;
       }
 
@@ -1374,7 +1440,8 @@ export function createPlatformRequestHandler(options = {}) {
       if (req.method === "GET" && url.pathname === "/api/admin/card-providers/kimoox/bins") {
         if (!requireAdmin(req, res, adminToken, url)) return;
         const provider = createKimooxProviderFromStore(store, fetchImpl);
-        sendJson(res, 200, { ok: true, data: await provider.listBins() });
+        const bins = await provider.listBins();
+        sendJson(res, 200, { ok: true, data: bins, choices: bins.map(publicRemoteBin) });
         return;
       }
 

@@ -42,6 +42,18 @@ function normalizeKimooxIssueMode(value, fallback = "pool") {
   throw new Error("kimoox_issue_mode must be pool or per_order");
 }
 
+function normalizeCardSource(value, fallback = "local") {
+  const text = String(value === undefined || value === null || value === "" ? fallback : value).trim().toLowerCase();
+  if (["local", "vcc", "kimoox"].includes(text)) return text;
+  throw new Error("card_source must be local, vcc, or kimoox");
+}
+
+function normalizeRemoteFinalAction(value, fallback = "cancel") {
+  const text = String(value === undefined || value === null || value === "" ? fallback : value).trim().toLowerCase();
+  if (["keep", "freeze", "cancel"].includes(text)) return text;
+  throw new Error("remote final action must be keep, freeze, or cancel");
+}
+
 export function normalizePlanConfig(input = {}, defaults = {}) {
   const planType = normalizePlanType(input.plan_type ?? input.planType);
   const defaultFailureMessage = String(defaults.failure_message ?? defaults.failureMessage ?? DEFAULT_FAILURE_MESSAGE);
@@ -52,13 +64,25 @@ export function normalizePlanConfig(input = {}, defaults = {}) {
     payment_country: String(input.payment_country ?? input.paymentCountry ?? defaults.payment_country ?? ""),
     payment_currency: String(input.payment_currency ?? input.paymentCurrency ?? defaults.payment_currency ?? ""),
     checkout_template_key: String(input.checkout_template_key ?? input.checkoutTemplateKey ?? ""),
+    card_source: normalizeCardSource(
+      input.card_source ?? input.cardSource,
+      defaults.card_source
+        ?? ((input.kimoox_issue_mode ?? input.kimooxIssueMode ?? defaults.kimoox_issue_mode) === "per_order" ? "kimoox" : "local"),
+    ),
     checkout_proxy_group_id: integerInRange(input.checkout_proxy_group_id ?? input.checkoutProxyGroupId, 0, 0, Number.MAX_SAFE_INTEGER, "checkout_proxy_group_id"),
     direct_card_proxy_group_id: integerInRange(input.direct_card_proxy_group_id ?? input.directCardProxyGroupId, 0, 0, Number.MAX_SAFE_INTEGER, "direct_card_proxy_group_id"),
     billing_group_id: integerInRange(input.billing_group_id ?? input.billingGroupId, 0, 0, Number.MAX_SAFE_INTEGER, "billing_group_id"),
     failure_message: String(input.failure_message ?? input.failureMessage ?? defaultFailureMessage),
     checkout_max_proxy_attempts: integerInRange(input.checkout_max_proxy_attempts ?? input.checkoutMaxProxyAttempts, 4, 1, 1000, "checkout_max_proxy_attempts"),
     max_proxy_attempts_per_card: integerInRange(input.max_proxy_attempts_per_card ?? input.maxProxyAttemptsPerCard, 4, 1, 1000, "max_proxy_attempts_per_card"),
-    vcc_target_balance_usd: normalizeUsdAmount(input.vcc_target_balance_usd ?? input.vccTargetBalanceUsd ?? defaults.vcc_target_balance_usd ?? "", "", "vcc_target_balance_usd"),
+    vcc_target_balance_usd: normalizeUsdAmount(input.vcc_target_balance_usd ?? input.vccTargetBalanceUsd ?? input.remote_target_balance_usd ?? input.remoteTargetBalanceUsd ?? defaults.vcc_target_balance_usd ?? "", "", "vcc_target_balance_usd"),
+    vcc_card_bin: String(input.vcc_card_bin ?? input.vccCardBin ?? defaults.vcc_card_bin ?? "").trim(),
+    vcc_open_email: String(input.vcc_open_email ?? input.vccOpenEmail ?? defaults.vcc_open_email ?? "").trim(),
+    remote_max_cards: integerInRange(input.remote_max_cards ?? input.remoteMaxCards, defaults.remote_max_cards ?? 1, 1, 1000, "remote_max_cards"),
+    remote_success_withdraw: normalizeBoolean(input.remote_success_withdraw ?? input.remoteSuccessWithdraw, defaults.remote_success_withdraw ?? true),
+    remote_success_final_action: normalizeRemoteFinalAction(input.remote_success_final_action ?? input.remoteSuccessFinalAction, defaults.remote_success_final_action ?? (defaults.kimoox_cancel_after_order === 0 ? "keep" : "cancel")),
+    remote_failure_withdraw: normalizeBoolean(input.remote_failure_withdraw ?? input.remoteFailureWithdraw, defaults.remote_failure_withdraw ?? true),
+    remote_failure_final_action: normalizeRemoteFinalAction(input.remote_failure_final_action ?? input.remoteFailureFinalAction, defaults.remote_failure_final_action ?? (defaults.kimoox_cancel_after_order === 0 ? "keep" : "cancel")),
     kimoox_issue_mode: normalizeKimooxIssueMode(input.kimoox_issue_mode ?? input.kimooxIssueMode, defaults.kimoox_issue_mode ?? "pool"),
     kimoox_card_bin_id: String(input.kimoox_card_bin_id ?? input.kimooxCardBinId ?? defaults.kimoox_card_bin_id ?? "").trim(),
     kimoox_card_type: String(input.kimoox_card_type ?? input.kimooxCardType ?? defaults.kimoox_card_type ?? "PREPAID").trim() || "PREPAID",

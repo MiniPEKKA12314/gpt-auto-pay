@@ -1,6 +1,7 @@
 import { normalizePlanType } from "./constants.mjs";
 import { normalizeIpwoConfig } from "./proxy_provider_ipwo.mjs";
 import { normalizeProxyEntries } from "./proxy_pool.mjs";
+import { planCardSource } from "./card_lifecycle.mjs";
 import { selectBillingAddress, selectCard } from "./selection.mjs";
 
 function proxySummary(store, groupId, label) {
@@ -128,13 +129,26 @@ export function checkPlanRuntimeReadiness(store, planType) {
   if (!plan.payment_currency) warnings.push("付款币种未设置，将使用旧链路默认值 PHP");
 
   const cardGroups = Array.isArray(plan.card_groups) ? plan.card_groups : [];
-  if (cardGroups.length === 0) issues.push("套餐未绑定卡组");
-  const kimooxPerOrder = String(plan.kimoox_issue_mode ?? "pool").toLowerCase() === "per_order";
-  const card = kimooxPerOrder ? null : selectCard(store.listCards(), cardGroups);
-  if (!kimooxPerOrder && cardGroups.length > 0 && !card) issues.push("套餐绑定的卡组里没有可用卡");
-  if (kimooxPerOrder) {
-    if (!String(plan.kimoox_card_bin_id ?? "").trim()) issues.push("Kimoox 按订单开卡未配置 BIN ID");
-    if (!String(plan.vcc_target_balance_usd ?? "").trim()) issues.push("Kimoox 按订单开卡未配置目标余额（USD）");
+  if (cardGroups.length === 0) issues.push("套餐未绑定卡组（本地卡组/临时卡组）");
+  const source = planCardSource(plan);
+  const remotePerOrder = ["vcc", "kimoox"].includes(source);
+  const card = remotePerOrder ? null : selectCard(store.listCards(), cardGroups);
+  if (!remotePerOrder && cardGroups.length > 0 && !card) issues.push("套餐绑定的卡组里没有可用卡");
+  if (source === "kimoox") {
+    if (!String(plan.kimoox_card_bin_id ?? "").trim()) issues.push("Kimoox 每单开卡未配置 BIN ID");
+    if (!String(plan.vcc_target_balance_usd ?? "").trim()) issues.push("Kimoox 每单开卡未配置目标余额（USD）");
+    try {
+      const cfg = store.getCardProviderConfig("kimoox", { includeSecret: true });
+      if (!cfg.api_key || !cfg.api_secret) issues.push("Kimoox 卡台配置不完整");
+    } catch { issues.push("Kimoox 卡台配置不可用"); }
+  }
+  if (source === "vcc") {
+    if (!String(plan.vcc_card_bin ?? "").trim()) issues.push("VCC 每单开卡未配置开卡 BIN");
+    if (!String(plan.vcc_target_balance_usd ?? "").trim()) issues.push("VCC 每单开卡未配置目标余额（USD）");
+    try {
+      const cfg = store.getCardProviderConfig("vcc", { includeSecret: true });
+      if (!cfg.user_serial || !cfg.secret_key) issues.push("VCC 卡台配置不完整");
+    } catch { issues.push("VCC 卡台配置不可用"); }
   }
 
   if (!Number(plan.billing_group_id)) issues.push("套餐未绑定账单地址组");

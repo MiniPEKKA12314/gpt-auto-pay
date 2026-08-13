@@ -1,5 +1,5 @@
 import { OrderStatus } from "./constants.mjs";
-import { cleanupKimooxPerOrderCard, planUsesKimooxPerOrder } from "./card_lifecycle.mjs";
+import { cleanupKimooxPerOrderCard, planCardSource } from "./card_lifecycle.mjs";
 import { decideNextCheckoutRetry, decideNextRetry, isCheckoutPhaseResult, normalizeRetryPolicy } from "./retry_policy.mjs";
 import { selectBillingAddress, selectCard } from "./selection.mjs";
 
@@ -65,13 +65,14 @@ async function failOrder(store, orderId, attemptId, message, stage = "runner", n
   }, now);
 }
 
-function kimooxPerOrderPlaceholderCard(plan = {}) {
-  if (!planUsesKimooxPerOrder(plan)) return null;
+function remotePerOrderPlaceholderCard(plan = {}) {
+  const source = planCardSource(plan);
+  if (!["vcc", "kimoox"].includes(source)) return null;
   return {
     id: 0,
     card_group_id: Number(plan.card_groups?.[0]?.card_group_id ?? 0),
-    masked_number: "Kimoox 按订单开卡",
-    provider: "kimoox",
+    masked_number: source === "kimoox" ? "Kimoox 按订单开卡" : "VCC 按订单开卡",
+    provider: source,
     provider_card_id: "",
     success_count: 0,
     max_success_count: 1,
@@ -84,9 +85,14 @@ function resultCardId(result = {}) {
 }
 
 
-async function cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime = {}, options = {}, attemptId = 0, now = () => Date.now() / 1000) {
-  if (!planUsesKimooxPerOrder(plan)) return null;
-  const cardId = Number(retryRuntime.kimooxPerOrderCardId ?? retryRuntime.kimoox_per_order_card_id ?? 0);
+async function cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime = {}, options = {}, attemptId = 0, now = () => Date.now() / 1000, directResult = null) {
+  const source = planCardSource(plan);
+  if (!["vcc", "kimoox"].includes(source)) return null;
+  const cardId = Number(
+    source === "vcc"
+      ? (retryRuntime.vccPerOrderCardId ?? retryRuntime.vcc_per_order_card_id ?? 0)
+      : (retryRuntime.kimooxPerOrderCardId ?? retryRuntime.kimoox_per_order_card_id ?? 0)
+  );
   if (!cardId) return null;
   let card;
   try {
@@ -97,7 +103,7 @@ async function cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime = {},
       attempt_id: attemptId,
       level: "error",
       stage: "kimoox_cleanup",
-      message: `Kimoox ???????????????? ${cardId}`,
+      message: `${source.toUpperCase()} 临时卡收尾失败：本地卡不存在 ${cardId}`,
       meta: { error: error.message || String(error), card_id: cardId },
     }, now());
     return { ok: false, local_card_id: cardId, errors: [error.message || String(error)] };
@@ -114,6 +120,8 @@ async function cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime = {},
     fetchImpl: options.fetchImpl,
     cardProviderFactory: options.cardProviderFactory,
     retryRuntime,
+    directResult,
+    success: directResult?.ok === true || directResult?.status === "success",
   });
   retryRuntime.kimooxPerOrderCleanup = cleanup;
   return cleanup;
@@ -135,7 +143,7 @@ export function resolveOrderResources(store, order) {
   const plan = manualEffectivePlan(store.getPlanConfig(order.plan_type, { includeCardGroups: true }), manualOptions);
   const card = manualOptions?.card_id
     ? store.getCardById(manualOptions.card_id)
-    : kimooxPerOrderPlaceholderCard(plan) || selectCard(store.listCards(), plan.card_groups);
+    : remotePerOrderPlaceholderCard(plan) || selectCard(store.listCards(), plan.card_groups);
   const billingAddress = manualOptions?.billing_address_id
     ? store.getBillingAddressById(manualOptions.billing_address_id)
     : selectBillingAddress(store.listBillingAddresses(), plan.billing_group_id);
@@ -216,7 +224,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
   }
 
   if (isSuccessResult(runnerResult)) {
-    const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now);
+    const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
     runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
     store.updateOrderAttempt(attemptId, {
       status: "success",
@@ -244,7 +252,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
     };
   }
 
-  const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now);
+  const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
   runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
   const message = runnerResult?.message || runnerResult?.error || "runner failed";
   const failed = await failOrder(store, order.id, attemptId, message, "runner", now());
@@ -360,7 +368,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     if (!card) {
       card = manualOptions?.card_id
         ? store.getCardById(manualOptions.card_id)
-        : kimooxPerOrderPlaceholderCard(plan) || selectCard(store.listCards(), plan.card_groups, { excludeCardIds: attemptedCardIds });
+        : remotePerOrderPlaceholderCard(plan) || selectCard(store.listCards(), plan.card_groups, { excludeCardIds: attemptedCardIds });
       if (!card) {
         const attemptId = store.createOrderAttempt({
           order_id: order.id,
@@ -448,7 +456,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     }
 
     if (isSuccessResult(runnerResult)) {
-      const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now);
+      const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
       runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
       store.updateOrderAttempt(attemptId, {
         status: "success",
@@ -540,7 +548,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
       continue;
     }
 
-    const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now);
+    const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
     runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
     const cleanupSuffix = cleanup?.ok === false ? `?Kimoox ???????: ${(cleanup.errors || []).join("; ")}` : "";
     const failed = store.markOrderFailedAndReleaseCode(order.id, {
@@ -562,6 +570,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     };
   }
 
+  const runnerResult = null;
   const message = "重试次数异常耗尽";
   const attemptId = store.createOrderAttempt({
     order_id: order.id,
@@ -573,8 +582,8 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     error_code: "RETRY_GUARD_EXHAUSTED",
     error_message: message,
   }, now());
-  const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now);
-  const failed = await failOrder(store, order.id, attemptId, message + (cleanup?.ok === false ? `?Kimoox ???????: ${(cleanup.errors || []).join("; ")}` : ""), "retry_guard", now());
+  const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
+  const failed = await failOrder(store, order.id, attemptId, message + (cleanup?.ok === false ? `；远程临时卡收尾失败: ${(cleanup.errors || []).join("; ")}` : ""), "retry_guard", now());
   return {
     ok: false,
     result: resultFailed(message, { code: "RETRY_GUARD_EXHAUSTED" }),

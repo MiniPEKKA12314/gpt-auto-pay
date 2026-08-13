@@ -3,7 +3,9 @@ import { DirectCardRunnerAdapter } from "./direct_card_runner_adapter.mjs";
 import {
   ensureVccCardBalanceBeforeDirectCard,
   planUsesKimooxPerOrder,
+  planUsesVccPerOrder,
   prepareKimooxPerOrderCard,
+  prepareVccPerOrderCard,
   runCardLifecycleAction,
 } from "./card_lifecycle.mjs";
 import { PlatformStoreError } from "./db.mjs";
@@ -256,6 +258,10 @@ export class PlatformPaymentAttemptAdapter {
         perOrderCard = await prepareKimooxPerOrderCard(lifecycleContext);
         effectiveCard = perOrderCard.card;
         lifecycleContext = { ...lifecycleContext, card: effectiveCard };
+      } else if (planUsesVccPerOrder(context.plan)) {
+        perOrderCard = await prepareVccPerOrderCard(lifecycleContext);
+        effectiveCard = perOrderCard.card;
+        lifecycleContext = { ...lifecycleContext, card: effectiveCard };
       }
       await runCardLifecycleAction("unfreeze", lifecycleContext);
       directStarted = true;
@@ -270,6 +276,7 @@ export class PlatformPaymentAttemptAdapter {
         emit,
       });
       lifecycleAfterAction = directResult?.status === "success" || directResult?.ok === true ? "freeze_success" : "freeze_failure";
+      if (lifecycleContext) lifecycleContext.directResult = directResult;
     } catch (error) {
       const errorCode = String(error?.code || "");
       const resultCode = errorCode.startsWith("VCC_") || errorCode.startsWith("KIMOOX_") ? errorCode : "DIRECT_CARD_EXCEPTION";
@@ -301,7 +308,7 @@ export class PlatformPaymentAttemptAdapter {
             directResult = failedResult("Subscription may have succeeded, but VCC remote card freeze failed: " + message, "CARD_FREEZE_FAILED", {
               phase: "direct_card",
               previous: directResult,
-            });
+          });
           }
         }
       }

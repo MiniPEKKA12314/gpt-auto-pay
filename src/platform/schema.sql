@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS plan_configs (
   payment_country TEXT DEFAULT '',
   payment_currency TEXT DEFAULT '',
   checkout_template_key TEXT DEFAULT '',
+  card_source TEXT NOT NULL DEFAULT 'local',
   checkout_proxy_group_id INTEGER DEFAULT 0,
   direct_card_proxy_group_id INTEGER DEFAULT 0,
   billing_group_id INTEGER DEFAULT 0,
@@ -78,6 +79,13 @@ CREATE TABLE IF NOT EXISTS plan_configs (
   checkout_max_proxy_attempts INTEGER NOT NULL DEFAULT 4,
   max_proxy_attempts_per_card INTEGER NOT NULL DEFAULT 4,
   vcc_target_balance_usd TEXT DEFAULT '',
+  vcc_card_bin TEXT DEFAULT '',
+  vcc_open_email TEXT DEFAULT '',
+  remote_max_cards INTEGER NOT NULL DEFAULT 1,
+  remote_success_withdraw INTEGER NOT NULL DEFAULT 1,
+  remote_success_final_action TEXT NOT NULL DEFAULT 'cancel',
+  remote_failure_withdraw INTEGER NOT NULL DEFAULT 1,
+  remote_failure_final_action TEXT NOT NULL DEFAULT 'cancel',
   kimoox_issue_mode TEXT NOT NULL DEFAULT 'pool',
   kimoox_card_bin_id TEXT DEFAULT '',
   kimoox_card_type TEXT DEFAULT 'PREPAID',
@@ -308,3 +316,27 @@ CREATE TABLE IF NOT EXISTS system_settings (
   updated_at REAL NOT NULL,
   updated_by INTEGER DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS webhook_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  event_category TEXT DEFAULT '',
+  event_time TEXT DEFAULT '',
+  merchant_id TEXT DEFAULT '',
+  request_no TEXT DEFAULT '',
+  provider_card_id TEXT DEFAULT '',
+  payload_json TEXT NOT NULL,
+  received_at REAL NOT NULL,
+  processed_at REAL DEFAULT 0,
+  process_status TEXT NOT NULL DEFAULT 'received',
+  process_error TEXT DEFAULT '',
+  UNIQUE(provider, event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_events_provider_type
+ON webhook_events(provider, event_type, received_at);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_events_request
+ON webhook_events(provider, request_no);
