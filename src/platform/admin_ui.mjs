@@ -250,6 +250,40 @@ export function renderAdminUi(options = {}) {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px 12px;
     }
+    .provider-tools {
+      margin-top: 12px;
+      gap: 12px;
+    }
+    .provider-tool {
+      align-content: start;
+      min-width: 0;
+      padding: 14px;
+      border: 1px solid #ccd3df;
+      border-radius: 8px;
+      background: #f8fafc;
+    }
+    .provider-tool-title {
+      grid-column: 1 / -1;
+      margin: 0 0 2px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #dfe4ec;
+      color: var(--text);
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+    .provider-result {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+    .provider-result h3 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+    .provider-result pre {
+      margin: 0;
+    }
     .full { grid-column: 1 / -1; }
     .check-list {
       display: grid;
@@ -715,8 +749,9 @@ export function renderAdminUi(options = {}) {
                 <button id="kimooxBinsBtn" type="button">拉取 BIN</button>
               </div>
             </form>
-            <div class="grid-2" style="margin-top:12px">
-              <form id="kimooxRemoteForm" class="form-grid">
+            <div class="grid-2 provider-tools">
+              <form id="kimooxRemoteForm" class="form-grid provider-tool">
+                <h3 class="provider-tool-title">远端卡查询与导入</h3>
                 <div><label>页码</label><input name="pageNum" type="number" min="1" value="1"></div>
                 <div><label>每页数量</label><input name="pageSize" type="number" min="1" max="1000" value="100"></div>
                 <div><label>远端卡 ID</label><input name="cardId"></div>
@@ -730,7 +765,8 @@ export function renderAdminUi(options = {}) {
                 <div class="full"><label>导入后远端卡自动策略</label><div class="check-list"><label><input id="kimooxImportAutoUnfreeze" type="checkbox" value="1" checked> 使用前自动解冻</label><label><input id="kimooxImportAutoFreezeSuccess" type="checkbox" value="1" checked> 成功后自动冻结</label><label><input id="kimooxImportAutoFreezeFailure" type="checkbox" value="1" checked> 失败后自动冻结</label></div></div>
                 <div class="full row"><button id="kimooxRemoteCardsBtn" type="button">查看远端卡</button><button id="kimooxImportBtn" type="button">导入远端卡</button></div>
               </form>
-              <form id="kimooxOpenForm" class="form-grid">
+              <form id="kimooxOpenForm" class="form-grid provider-tool">
+                <h3 class="provider-tool-title">申请新卡</h3>
                 <div><label>请求号</label><input name="requestNo" placeholder="留空自动生成"></div>
                 <div><label>卡类型</label><select name="cardType"><option value="PREPAID">PREPAID 储值卡</option><option value="BUDGET">BUDGET 预算卡</option></select></div>
                 <div><label>BIN ID</label><input name="cardBinId"></div>
@@ -744,12 +780,14 @@ export function renderAdminUi(options = {}) {
                 <div><label>批次号</label><input name="batchNo"></div>
                 <div class="full row"><button id="kimooxOpenCardBtn" type="button">申请卡</button><button id="kimooxOpenDetailBtn" type="button">查开卡任务</button></div>
               </form>
-              <form id="kimooxCardActionForm" class="form-grid">
+              <form id="kimooxCardActionForm" class="form-grid provider-tool">
+                <h3 class="provider-tool-title">单卡操作</h3>
                 <div><label>卡 ID</label><input name="cardId"></div>
                 <div><label>金额（USD）</label><input name="amount" inputmode="decimal"></div>
                 <div class="full row"><button id="kimooxRechargeBtn" type="button">充值</button><button id="kimooxCashOutBtn" type="button">资金转出</button><button id="kimooxSuspendBtn" type="button">冻结</button><button id="kimooxEnableBtn" type="button">解冻</button><button id="kimooxCancelBtn" type="button" class="danger">销卡</button></div>
               </form>
-              <form id="kimooxConsumeOrderForm" class="form-grid">
+              <form id="kimooxConsumeOrderForm" class="form-grid provider-tool">
+                <h3 class="provider-tool-title">交易流水</h3>
                 <div><label>卡号/后四位</label><input name="cardNo"></div>
                 <div><label>页码</label><input name="pageNum" type="number" min="1" value="1"></div>
                 <div><label>每页数量</label><input name="pageSize" type="number" min="1" max="1000" value="100"></div>
@@ -757,7 +795,10 @@ export function renderAdminUi(options = {}) {
                 <div class="full row"><button id="kimooxConsumeOrdersBtn" type="button">查询交易流水</button></div>
               </form>
             </div>
-            <pre id="kimooxOutput"></pre>
+            <div class="provider-result">
+              <h3>Kimoox 操作结果</h3>
+              <pre id="kimooxOutput"></pre>
+            </div>
           </section>
 
           <section>
