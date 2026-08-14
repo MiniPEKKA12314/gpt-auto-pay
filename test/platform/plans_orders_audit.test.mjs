@@ -13,6 +13,7 @@ test("plan config normalizes defaults and retry policy", () => {
     payment_currency: "PHP",
     allow_card_switch: "true",
     max_card_switches: 2,
+    remote_balance_success_fallback: "true",
   });
   assert.equal(config.display_name, "Plus");
   assert.equal(config.payment_country, "PH");
@@ -20,6 +21,7 @@ test("plan config normalizes defaults and retry policy", () => {
   assert.equal(config.failure_message, DEFAULT_FAILURE_MESSAGE);
   assert.equal(config.checkout_max_proxy_attempts, 4);
   assert.equal(config.max_proxy_attempts_per_card, 4);
+  assert.equal(config.remote_balance_success_fallback, true);
   assert.equal(config.allow_card_switch, true);
   assert.equal(config.max_card_switches, 2);
   assert.throws(() => normalizePlanConfig({ plan_type: "enterprise" }), /invalid plan_type/);

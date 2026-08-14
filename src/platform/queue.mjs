@@ -8,16 +8,29 @@ export function normalizeConcurrency(value) {
   return n;
 }
 
+function normalizeFailurePauseCount(value, fallback = 0) {
+  const n = value === undefined || value === null || value === "" ? fallback : Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 1000) {
+    throw new Error("auto pause failure count must be an integer between 0 and 1000");
+  }
+  return n;
+}
+
 function toBoolean(value, fallback = false) {
   if (value === undefined || value === null || value === "") return fallback;
   return value === true || value === 1 || value === "1" || String(value).toLowerCase() === "true";
 }
 
 export function createQueueSettings(options = {}) {
+  const legacyPause = toBoolean(options.pause_on_order_failure ?? options.pauseOnOrderFailure, false);
+  const configuredCount = options.auto_pause_failure_count ?? options.autoPauseFailureCount;
+  const autoPauseFailureCount = normalizeFailurePauseCount(configuredCount, legacyPause ? 1 : 0);
   return {
     status: options.status === QueueStatus.PAUSED ? QueueStatus.PAUSED : QueueStatus.RUNNING,
     global_concurrency: normalizeConcurrency(options.global_concurrency ?? 1),
-    pause_on_order_failure: toBoolean(options.pause_on_order_failure ?? options.pauseOnOrderFailure, false),
+    auto_pause_failure_count: autoPauseFailureCount,
+    failure_count: normalizeFailurePauseCount(options.failure_count ?? options.failureCount, 0),
+    pause_on_order_failure: autoPauseFailureCount > 0,
   };
 }
 

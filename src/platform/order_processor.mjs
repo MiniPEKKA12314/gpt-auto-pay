@@ -6,6 +6,7 @@ import {
   planUsesVccPerOrder,
   prepareKimooxPerOrderCard,
   prepareVccPerOrderCard,
+  queryVccStoredCardBalance,
   runCardLifecycleAction,
 } from "./card_lifecycle.mjs";
 import { PlatformStoreError } from "./db.mjs";
@@ -28,6 +29,30 @@ function failedResult(message, code, extra = {}) {
     message,
     ...extra,
   };
+}
+
+const BALANCE_SUCCESS_FALLBACK_TIMEOUT_MS = 60_000;
+const BALANCE_SUCCESS_FALLBACK_POLL_MS = 3_000;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function enabled(value) {
+  if (typeof value === "string") return ["1", "true", "yes", "on", "enabled"].includes(value.trim().toLowerCase());
+  return value === true || value === 1;
+}
+
+function canUseBalanceSuccessFallback(plan, result) {
+  if (!enabled(plan?.remote_balance_success_fallback ?? plan?.remoteBalanceSuccessFallback)) return false;
+  if (result?.ok === true || result?.status === "success") return false;
+  // Any non-success result may still have charged a remote card. The balance
+  // monitor is the final safeguard against releasing a paid order's code.
+  return true;
+}
+
+function formatUsdFromCents(value) {
+  return (Number(value || 0) / 100).toFixed(2);
 }
 
 function proxyGroupForPlan(store, plan, field) {
@@ -243,6 +268,7 @@ export class PlatformPaymentAttemptAdapter {
     let lifecycleAfterAction = "freeze_failure";
     let effectiveCard = context.card;
     let lifecycleContext;
+    let balanceBeforePayment = null;
     let perOrderCard = null;
     try {
       lifecycleContext = {
@@ -265,7 +291,8 @@ export class PlatformPaymentAttemptAdapter {
       }
       await runCardLifecycleAction("unfreeze", lifecycleContext);
       directStarted = true;
-      await ensureVccCardBalanceBeforeDirectCard(lifecycleContext);
+      const balancePreparation = await ensureVccCardBalanceBeforeDirectCard(lifecycleContext);
+      balanceBeforePayment = balancePreparation?.balance ?? null;
       directResult = await directCardAdapter.execute({
         ...context,
         card: effectiveCard,
@@ -275,6 +302,89 @@ export class PlatformPaymentAttemptAdapter {
         directCardProxy,
         emit,
       });
+      if (canUseBalanceSuccessFallback(context.plan, directResult) && balanceBeforePayment) {
+        const originalResult = directResult;
+        const timeoutMs = Number(this.directCardAdapterOptions.balanceSuccessFallbackTimeoutMs ?? context.balanceSuccessFallbackTimeoutMs ?? BALANCE_SUCCESS_FALLBACK_TIMEOUT_MS);
+        const pollMs = Number(this.directCardAdapterOptions.balanceSuccessFallbackPollMs ?? context.balanceSuccessFallbackPollMs ?? BALANCE_SUCCESS_FALLBACK_POLL_MS);
+        const deadline = Date.now() + Math.max(0, timeoutMs);
+        const beforeCents = Number(balanceBeforePayment.balance_cents || 0);
+        let lastObservation = "";
+        emit({
+          level: "info",
+          stage: "payment_balance_check",
+          message: `页面与账号套餐均未确认成功，开始余额兜底监控（最多 ${Math.ceil(Math.max(0, timeoutMs) / 1000)} 秒）...`,
+          meta: { before_balance_usd: formatUsdFromCents(beforeCents), threshold_percent: 50 },
+        });
+        do {
+          try {
+            const balanceAfterPayment = await queryVccStoredCardBalance(lifecycleContext);
+            const afterCents = Number(balanceAfterPayment.balance_cents || 0);
+            const decreaseCents = Math.max(0, beforeCents - afterCents);
+            const decreaseRatio = beforeCents > 0 ? decreaseCents / beforeCents : 0;
+            const decreasePercent = Number((decreaseRatio * 100).toFixed(2));
+            const observation = `${afterCents}:${decreasePercent}`;
+            if (observation !== lastObservation) {
+              lastObservation = observation;
+              emit({
+                level: decreaseRatio > 0.5 ? "success" : "info",
+                stage: "payment_balance_check",
+                message: `付款后余额核验: ${formatUsdFromCents(beforeCents)} -> ${formatUsdFromCents(afterCents)} USD，下降 ${decreasePercent.toFixed(2)}%`,
+                meta: {
+                  before_balance_usd: formatUsdFromCents(beforeCents),
+                  after_balance_usd: formatUsdFromCents(afterCents),
+                  decrease_usd: formatUsdFromCents(decreaseCents),
+                  decrease_percent: decreasePercent,
+                  threshold_percent: 50,
+                  original_code: originalResult?.code || "",
+                },
+              });
+            }
+            if (beforeCents > 0 && decreaseRatio > 0.5) {
+              directResult = {
+                ok: true,
+                status: "success",
+                code: "DIRECT_CARD_SUCCEEDED_BY_BALANCE",
+                message: `页面与账号套餐均未返回最终成功状态，但远程卡余额由 ${formatUsdFromCents(beforeCents)} 降至 ${formatUsdFromCents(afterCents)} USD，下降 ${decreasePercent.toFixed(2)}%，超过 50%，按充值成功处理`,
+                runner: originalResult?.runner,
+                balanceFallback: {
+                  matched: true,
+                  before_balance_usd: formatUsdFromCents(beforeCents),
+                  after_balance_usd: formatUsdFromCents(afterCents),
+                  decrease_usd: formatUsdFromCents(decreaseCents),
+                  decrease_percent: decreasePercent,
+                  threshold_percent: 50,
+                  original_code: originalResult?.code || "",
+                  original_message: originalResult?.message || "",
+                },
+              };
+              break;
+            }
+          } catch (error) {
+            const observation = `error:${error.message || error}`;
+            if (observation !== lastObservation) {
+              lastObservation = observation;
+              emit({
+                level: "warn",
+                stage: "payment_balance_check",
+                message: `付款后余额核验暂时失败，将继续重试: ${error.message || error}`,
+                meta: { error: error.message || String(error), original_code: originalResult?.code || "" },
+              });
+            }
+          }
+          if (Date.now() >= deadline) break;
+          await delay(Math.min(Math.max(100, pollMs), Math.max(100, deadline - Date.now())));
+        } while (Date.now() <= deadline);
+        if (directResult !== originalResult && directResult?.ok === true) {
+          emit({ level: "success", stage: "payment_balance_check", message: directResult.message, meta: directResult.balanceFallback });
+        } else {
+          emit({
+            level: "warn",
+            stage: "payment_balance_check",
+            message: `余额兜底监控结束，${Math.ceil(Math.max(0, timeoutMs) / 1000)} 秒内未满足余额下降超过 50% 的成功条件`,
+            meta: { original_code: originalResult?.code || "" },
+          });
+        }
+      }
       lifecycleAfterAction = directResult?.status === "success" || directResult?.ok === true ? "freeze_success" : "freeze_failure";
       if (lifecycleContext) lifecycleContext.directResult = directResult;
     } catch (error) {

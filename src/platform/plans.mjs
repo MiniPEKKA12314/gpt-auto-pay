@@ -76,6 +76,8 @@ export function normalizePlanConfig(input = {}, defaults = {}) {
     checkout_max_proxy_attempts: integerInRange(input.checkout_max_proxy_attempts ?? input.checkoutMaxProxyAttempts, 4, 1, 1000, "checkout_max_proxy_attempts"),
     max_proxy_attempts_per_card: integerInRange(input.max_proxy_attempts_per_card ?? input.maxProxyAttemptsPerCard, 4, 1, 1000, "max_proxy_attempts_per_card"),
     vcc_target_balance_usd: normalizeUsdAmount(input.vcc_target_balance_usd ?? input.vccTargetBalanceUsd ?? input.remote_target_balance_usd ?? input.remoteTargetBalanceUsd ?? defaults.vcc_target_balance_usd ?? "", "", "vcc_target_balance_usd"),
+    remote_balance_success_fallback: normalizeBoolean(input.remote_balance_success_fallback ?? input.remoteBalanceSuccessFallback, defaults.remote_balance_success_fallback ?? false),
+    lock_redeem_code_on_failure: normalizeBoolean(input.lock_redeem_code_on_failure ?? input.lockRedeemCodeOnFailure, defaults.lock_redeem_code_on_failure ?? false),
     vcc_card_bin: String(input.vcc_card_bin ?? input.vccCardBin ?? defaults.vcc_card_bin ?? "").trim(),
     vcc_open_email: String(input.vcc_open_email ?? input.vccOpenEmail ?? defaults.vcc_open_email ?? "").trim(),
     remote_max_cards: integerInRange(input.remote_max_cards ?? input.remoteMaxCards, defaults.remote_max_cards ?? 1, 1, 1000, "remote_max_cards"),

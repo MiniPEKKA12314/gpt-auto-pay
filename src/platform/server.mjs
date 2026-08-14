@@ -570,7 +570,7 @@ export function createPlatformRequestHandler(options = {}) {
             sessionCookieName: body.sessionCookieName ?? body.session_cookie_name,
           });
         }
-        sendJson(res, 200, { ok: true, data: publicOrderSummary(order) });
+        sendJson(res, 200, { ok: true, data: publicOrderSummary(order, store.getPlanConfig(order.plan_type, { includeCardGroups: false })) });
         return;
       }
 
@@ -587,7 +587,7 @@ export function createPlatformRequestHandler(options = {}) {
           sendError(res, 404, "ORDER_NOT_FOUND", "未找到该兑换码对应的订单");
           return;
         }
-        sendJson(res, 200, { ok: true, data: publicOrderSummary(order) });
+        sendJson(res, 200, { ok: true, data: publicOrderSummary(order, store.getPlanConfig(order.plan_type, { includeCardGroups: false })) });
         return;
       }
 
@@ -600,7 +600,7 @@ export function createPlatformRequestHandler(options = {}) {
           sendError(res, 404, "ORDER_NOT_FOUND", "订单不存在");
           return;
         }
-        sendJson(res, 200, { ok: true, data: publicOrderSummary(order) });
+        sendJson(res, 200, { ok: true, data: publicOrderSummary(order, store.getPlanConfig(order.plan_type, { includeCardGroups: false })) });
         return;
       }
 

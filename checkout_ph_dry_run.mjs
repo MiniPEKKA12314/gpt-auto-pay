@@ -1019,6 +1019,7 @@ export function normalizeDirectCardInput(value = {}) {
   const sessionCookieName = firstString(value.sessionCookieName, value.session_cookie_name, "__Secure-next-auth.session-token");
   const paymentCountry = firstString(value.paymentCountry, value.payment_country, "PH").toUpperCase();
   const paymentCurrency = firstString(value.paymentCurrency, value.payment_currency, "PHP").toUpperCase();
+  const targetPlanType = String(firstString(value.targetPlanType, value.target_plan_type, value.planType, value.plan_type) || "").toLowerCase();
 
   if (!luhnValid(number)) throw new Error("卡号未通过 Luhn 校验");
   if (!/^\d{3,4}$/.test(cvc)) throw new Error("CVC 必须是 3 或 4 位数字");
@@ -1044,6 +1045,7 @@ export function normalizeDirectCardInput(value = {}) {
     sessionCookieName,
     paymentCountry,
     paymentCurrency,
+    targetPlanType,
     billing: normalizeBillingAddress(value.billing ?? value.billingAddress ?? {}),
   });
 }
@@ -2086,6 +2088,136 @@ export function buildChatgptPostClickProbeExpression() {
 })();`;
 }
 
+function normalizeChatgptSubscriptionPlan(value) {
+  const text = String(value ?? "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (!text) return "";
+  if (text.includes("free")) return "free";
+  if (text.includes("pro20")) return "pro20x";
+  if (text.includes("prolite") || text.includes("pro5")) return "pro5x";
+  if (text === "pro" || text === "chatgptpro") return "pro";
+  if (text.includes("plus")) return "plus";
+  if (text === "go" || text.includes("chatgptgo")) return "go";
+  return text;
+}
+
+export function classifyChatgptAccountSubscription(snapshot = {}, expectedPlanType = "") {
+  const expected = normalizeChatgptSubscriptionPlan(expectedPlanType);
+  const accepted = expected === "pro5x" || expected === "pro20x"
+    ? new Set([expected, "pro"])
+    : new Set([expected]);
+  const candidates = [
+    snapshot.authPlan,
+    snapshot.tokenPlan,
+    ...(Array.isArray(snapshot.accountPlans) ? snapshot.accountPlans : []),
+    ...(Array.isArray(snapshot.plans) ? snapshot.plans : []),
+  ]
+    .map(normalizeChatgptSubscriptionPlan)
+    .filter(Boolean)
+    .filter((value, index, values) => values.indexOf(value) === index);
+  const matchedPlan = candidates.find((value) => accepted.has(value)) || "";
+  const currentPlan = candidates.find((value) => value !== "free") || candidates[0] || "";
+  return {
+    ok: Boolean(matchedPlan),
+    status: matchedPlan ? "success" : "pending",
+    expectedPlan: expected,
+    matchedPlan,
+    currentPlan,
+    candidates,
+    authStatus: Number(snapshot.authStatus || 0),
+    accountsStatus: Number(snapshot.accountsStatus || 0),
+    error: String(snapshot.error || ""),
+    message: matchedPlan
+      ? `账号套餐复查成功：目标 ${expectedPlanType}，当前套餐 ${matchedPlan}`
+      : `账号套餐尚未确认：目标 ${expectedPlanType}，当前 ${currentPlan || "未识别"}`,
+  };
+}
+
+export function buildChatgptSubscriptionCheckExpression({ accessToken = "" } = {}) {
+  const fallbackAccessToken = JSON.stringify(String(accessToken || ""));
+  return `(async () => {
+  const fallbackAccessToken = ${fallbackAccessToken};
+  const plans = [];
+  const addPlan = (value) => {
+    const text = String(value ?? "").trim();
+    if (text && !plans.includes(text)) plans.push(text);
+  };
+  const tokenPlan = (token) => {
+    try {
+      const part = String(token || "").split(".")[1] || "";
+      const normalized = part.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(part.length / 4) * 4, "=");
+      const payload = JSON.parse(atob(normalized));
+      return payload?.["https://api.openai.com/auth"]?.chatgpt_plan_type || "";
+    } catch {
+      return "";
+    }
+  };
+  const addAccountPlans = (entry) => {
+    if (!entry || typeof entry !== "object") return;
+    addPlan(entry.planType);
+    addPlan(entry.plan_type);
+    addPlan(entry.subscriptionPlan);
+    addPlan(entry.subscription_plan);
+    addPlan(entry.account?.planType);
+    addPlan(entry.account?.plan_type);
+    addPlan(entry.subscription?.planType);
+    addPlan(entry.subscription?.plan_type);
+  };
+  let authStatus = 0;
+  let accountsStatus = 0;
+  let authPlan = "";
+  let refreshedToken = "";
+  let error = "";
+  try {
+    const authResponse = await fetch("https://chatgpt.com/api/auth/session", {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+      headers: { accept: "application/json" },
+    });
+    authStatus = authResponse.status;
+    if (authResponse.ok) {
+      const auth = await authResponse.json();
+      refreshedToken = String(auth?.accessToken || "");
+      authPlan = String(auth?.account?.planType || auth?.account?.plan_type || "");
+      addPlan(authPlan);
+      addPlan(tokenPlan(refreshedToken));
+    }
+  } catch (cause) {
+    error = String(cause?.message || cause || "auth session request failed");
+  }
+  const bearer = refreshedToken || fallbackAccessToken;
+  if (bearer) {
+    try {
+      const offset = new Date().getTimezoneOffset();
+      const accountsResponse = await fetch("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=" + offset, {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        headers: { accept: "application/json", authorization: "Bearer " + bearer },
+      });
+      accountsStatus = accountsResponse.status;
+      if (accountsResponse.ok) {
+        const accounts = await accountsResponse.json();
+        addAccountPlans(accounts);
+        if (Array.isArray(accounts?.accounts)) accounts.accounts.forEach(addAccountPlans);
+        else if (accounts?.accounts && typeof accounts.accounts === "object") Object.values(accounts.accounts).forEach(addAccountPlans);
+      }
+    } catch (cause) {
+      error = [error, String(cause?.message || cause || "accounts check failed")].filter(Boolean).join("; ");
+    }
+  }
+  return {
+    href: location.href,
+    authStatus,
+    accountsStatus,
+    authPlan,
+    tokenPlan: tokenPlan(refreshedToken || fallbackAccessToken),
+    accountPlans: plans,
+    error,
+  };
+})()`;
+}
+
 export function summarizeChatgptPostClickTargets(targets = []) {
   const summary = {
     checkoutPages: 0,
@@ -2519,6 +2651,93 @@ async function collectChatgptPostClickState(cdp, rootSessionId, contexts, debugP
   });
 }
 
+async function collectChatgptAccountSubscriptionState(cdp, rootSessionId, options = {}) {
+  const expression = buildChatgptSubscriptionCheckExpression({ accessToken: options.accessToken });
+  const evaluation = await cdp.send("Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+  }, rootSessionId);
+  const snapshot = evaluation?.result?.value;
+  if (!snapshot || typeof snapshot !== "object") {
+    return classifyChatgptAccountSubscription({ error: "浏览器未返回账号套餐数据" }, options.expectedPlanType);
+  }
+  return {
+    ...classifyChatgptAccountSubscription(snapshot, options.expectedPlanType),
+    snapshot: {
+      href: snapshot.href || "",
+      authStatus: Number(snapshot.authStatus || 0),
+      accountsStatus: Number(snapshot.accountsStatus || 0),
+      authPlan: snapshot.authPlan || "",
+      tokenPlan: snapshot.tokenPlan || "",
+      accountPlans: Array.isArray(snapshot.accountPlans) ? snapshot.accountPlans : [],
+      error: snapshot.error || "",
+    },
+  };
+}
+
+async function monitorChatgptAccountSubscription(cdp, rootSessionId, emit, options = {}) {
+  const timeoutMs = Number.isFinite(options.accountVerificationTimeoutMs) ? options.accountVerificationTimeoutMs : 75_000;
+  const pollMs = Number.isFinite(options.accountVerificationPollMs) ? options.accountVerificationPollMs : 3_000;
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  let lastSummary = "";
+  emit({
+    type: "log",
+    time: new Date().toISOString(),
+    stage: "subscription_check",
+    message: `页面未确认成功，开始复查账号套餐（最多 ${Math.ceil(timeoutMs / 1000)} 秒）...`,
+  });
+  while (Date.now() < deadline) {
+    try {
+      latest = await collectChatgptAccountSubscriptionState(cdp, rootSessionId, options);
+      const summary = `${latest.currentPlan}:${latest.authStatus}:${latest.accountsStatus}:${latest.error}`;
+      if (summary !== lastSummary) {
+        lastSummary = summary;
+        emit({
+          type: "log",
+          time: new Date().toISOString(),
+          stage: "subscription_check",
+          level: latest.ok ? "info" : "warn",
+          message: latest.message,
+        });
+      }
+      if (latest.ok) {
+        return {
+          status: "success",
+          terminal: true,
+          source: "account_subscription_check",
+          evidence: latest.matchedPlan,
+          rawError: "",
+          verificationType: null,
+          accountVerification: latest,
+          message: latest.message,
+        };
+      }
+    } catch (error) {
+      latest = {
+        ok: false,
+        status: "pending",
+        expectedPlan: options.expectedPlanType,
+        error: error.message || String(error),
+        message: `账号套餐复查暂时失败：${error.message || error}`,
+      };
+    }
+    await delay(Math.min(pollMs, Math.max(100, deadline - Date.now())));
+  }
+  return {
+    status: "processing",
+    terminal: false,
+    source: "account_subscription_check",
+    evidence: "",
+    rawError: "",
+    verificationType: null,
+    accountVerification: latest,
+    timedOut: true,
+    message: `账号套餐复查 ${Math.ceil(timeoutMs / 1000)} 秒内未确认目标套餐 ${options.expectedPlanType}`,
+  };
+}
+
 function emitChatgptPostClickRawSignals(emit, result = {}) {
   const signals = [
     result.rawError,
@@ -2539,7 +2758,7 @@ function emitChatgptPostClickRawSignals(emit, result = {}) {
 }
 
 async function monitorChatgptPostClickState(cdp, rootSessionId, contexts, emit, options = {}) {
-  const timeoutMs = Number.isFinite(options.postClickTimeoutMs) ? options.postClickTimeoutMs : 75000;
+  const timeoutMs = Number.isFinite(options.postClickTimeoutMs) ? options.postClickTimeoutMs : 60_000;
   const deadline = Date.now() + timeoutMs;
   const pollMs = Number.isFinite(options.postClickPollMs) ? options.postClickPollMs : 500;
   let latest = null;
@@ -2742,13 +2961,26 @@ async function autofillChatgptShortlinkCard(cdp, rootSessionId, cardInput, conte
     if (options.locatePaymentButton) {
       result.paymentButton = await locateChatgptShortlinkPaymentButton(cdp, rootSessionId, contexts, emit, options);
       if (result.paymentButton?.clicked) {
-        result.postClick = await monitorChatgptPostClickState(
+        const pageResult = await monitorChatgptPostClickState(
           cdp,
           rootSessionId,
           contexts,
           emit,
           options,
         );
+        result.postClick = pageResult;
+        if (!pageResult.terminal && options.expectedPlanType && Number(options.accountVerificationTimeoutMs ?? 75_000) > 0) {
+          const accountResult = await monitorChatgptAccountSubscription(cdp, rootSessionId, emit, options);
+          result.postClick = accountResult.ok || accountResult.status === "success"
+            ? { ...accountResult, pageResult }
+            : {
+                ...pageResult,
+                source: "page_then_account_subscription_check",
+                accountVerification: accountResult.accountVerification,
+                accountVerificationTimedOut: true,
+                message: `${pageResult.message}；${accountResult.message}`,
+              };
+        }
       }
     }
     return result;
@@ -2853,7 +3085,16 @@ async function autofillChatgptShortlinkCard(cdp, rootSessionId, cardInput, conte
   };
 }
 
-export async function runChatgptShortlinkCard({ card, emit = () => {}, proxyUrl = null, registerChildProcess = null } = {}) {
+export async function runChatgptShortlinkCard({
+  card,
+  emit = () => {},
+  proxyUrl = null,
+  registerChildProcess = null,
+  postClickTimeoutMs = 60_000,
+  postClickPollMs = 500,
+  accountVerificationTimeoutMs = 75_000,
+  accountVerificationPollMs = 3_000,
+} = {}) {
   const input = normalizeDirectCardInput(card);
   const clickPaymentButton = card?.clickPaymentButton === true || isTruthy(card?.clickPaymentButton);
   const locatePaymentButton = card?.locatePaymentButton === true || clickPaymentButton || isTruthy(card?.locatePaymentButton);
@@ -2998,6 +3239,12 @@ export async function runChatgptShortlinkCard({ card, emit = () => {}, proxyUrl 
       locatePaymentButton,
       clickPaymentButton,
       proxyConfigured: preparedProxy.proxyChain.length > 0,
+      postClickTimeoutMs,
+      postClickPollMs,
+      accountVerificationTimeoutMs,
+      accountVerificationPollMs,
+      expectedPlanType: input.targetPlanType,
+      accessToken: input.accessToken,
     });
     if (fillResult.ok) {
       emit({

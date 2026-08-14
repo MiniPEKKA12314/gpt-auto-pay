@@ -516,3 +516,59 @@ test("VCC target balance is checked and recharged before direct card", async () 
     store.close();
   }
 });
+
+test("remote balance decrease fallback marks an unresolved payment as successful", async () => {
+  const { store, cardId, orderId } = createProcessorStore();
+  try {
+    store.setCardProviderConfig("vcc", { user_serial: "user-1", secret_key: "secret" }, 80);
+    store.updateCard(cardId, {
+      provider: "vcc",
+      provider_card_id: "remote-balance-fallback-1",
+    }, 81);
+    store.upsertPlanConfig({
+      ...store.getPlanConfig("plus"),
+      vcc_target_balance_usd: "17.00",
+      remote_balance_success_fallback: true,
+    }, 82);
+
+    let cardBalanceCents = 1700;
+    const factory = createPlatformPaymentAdapterFactory({
+      checkoutAdapterFactory: () => ({
+        async execute() {
+          return { ok: true, status: "success", checkoutInput: "oaics_balance_fallback", checkout_input: "oaics_balance_fallback" };
+        },
+      }),
+      directCardAdapterFactory: () => ({
+        async execute() {
+          cardBalanceCents = 98;
+          return {
+            ok: false,
+            status: "failed",
+            code: "DIRECT_CARD_DECLINED",
+            message: "Payment was not approved",
+          };
+        },
+      }),
+    });
+    const cardProviderFactory = () => ({
+      async listCards() {
+        return [{
+          provider_card_id: "remote-balance-fallback-1",
+          card_balance: (cardBalanceCents / 100).toFixed(2),
+          masked_number: "4242 **** **** 4242",
+        }];
+      },
+    });
+
+    const result = await runPlatformOrderWithRetry(store, orderId, factory, { now: () => 500, cardProviderFactory });
+    assert.equal(result.ok, true);
+    assert.equal(result.order.status, "succeeded");
+    assert.equal(result.result.code, "DIRECT_CARD_SUCCEEDED_BY_BALANCE");
+    assert.equal(result.result.balanceFallback.before_balance_usd, "17.00");
+    assert.equal(result.result.balanceFallback.after_balance_usd, "0.98");
+    assert.equal(result.result.balanceFallback.decrease_percent, 94.24);
+    assert.match(store.listRunLogs(orderId).map((log) => log.message).join("\n"), /超过 50%，按充值成功处理/);
+  } finally {
+    store.close();
+  }
+});

@@ -13,6 +13,8 @@ test("queue settings validate concurrency and pause state", () => {
   assert.deepEqual(createQueueSettings({}), {
     status: QueueStatus.RUNNING,
     global_concurrency: 1,
+    auto_pause_failure_count: 0,
+    failure_count: 0,
     pause_on_order_failure: false,
   });
   assert.equal(createQueueSettings({ pause_on_order_failure: true }).pause_on_order_failure, true);

@@ -427,7 +427,8 @@ export function renderPublicUi(options = {}) {
       box.className = "state " + tone;
       const orderLine = data && data.order_id ? '<div class="mono muted">' + escapeHtml(data.order_id) + '</div>' : "";
       const planLine = data && data.plan_name ? '<div>套餐：' + escapeHtml(data.plan_name) + '</div>' : "";
-      box.innerHTML = '<strong>' + escapeHtml(statusLabel(status)) + '</strong>' + planLine + '<div>' + escapeHtml((data && data.message) || "") + '</div>' + orderLine;
+      const contactLine = status === "failed" ? '<div class="muted">如需帮助，请联系客服。</div>' : "";
+      box.innerHTML = '<strong>' + escapeHtml(statusLabel(status)) + '</strong>' + planLine + '<div>' + escapeHtml((data && data.message) || "") + '</div>' + contactLine + orderLine;
       if (data && data.order_id) {
         $("orderInput").value = data.order_id;
         if (!transient && isPendingStatus(status)) {

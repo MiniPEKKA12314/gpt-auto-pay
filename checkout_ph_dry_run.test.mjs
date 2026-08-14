@@ -15,6 +15,7 @@ import {
   buildBillingAddressAutofillExpression,
   buildChromeLaunchArgs,
   buildChatgptPostClickProbeExpression,
+  buildChatgptSubscriptionCheckExpression,
   buildCheckoutLinks,
   buildCheckoutUpdateBody,
   buildCheckoutUpdateHeaders,
@@ -30,6 +31,7 @@ import {
   describeChatgptShortlinkPageLoadFailure,
   diagnoseChatgptShortlinkPaymentTargets,
   classifyChatgptPostClickState,
+  classifyChatgptAccountSubscription,
   summarizeChatgptPostClickTargets,
   extractLatestCheckoutRequest,
   formatCheckoutLinks,
@@ -1645,6 +1647,36 @@ test("ChatGPT post-click status diagnostics classify success, decline, captcha, 
   assert.equal(targetOnlyVerification.rawError, "");
   assert.deepEqual(targetOnlyVerification.rawSignals, []);
   assert.equal(Object.hasOwn(targetOnlyVerification, "rawBodyText"), false);
+});
+
+test("ChatGPT account subscription check matches target plans without exposing tokens", () => {
+  const plus = classifyChatgptAccountSubscription({
+    authStatus: 200,
+    accountsStatus: 200,
+    authPlan: "free",
+    accountPlans: ["chatgptplusplan"],
+  }, "plus");
+  assert.equal(plus.ok, true);
+  assert.equal(plus.matchedPlan, "plus");
+
+  const pro = classifyChatgptAccountSubscription({
+    authStatus: 200,
+    tokenPlan: "pro",
+  }, "pro20x");
+  assert.equal(pro.ok, true);
+  assert.equal(pro.matchedPlan, "pro");
+
+  const pending = classifyChatgptAccountSubscription({
+    authStatus: 200,
+    authPlan: "free",
+  }, "plus");
+  assert.equal(pending.ok, false);
+  assert.equal(pending.status, "pending");
+
+  const expression = buildChatgptSubscriptionCheckExpression({ accessToken: "secret-access-token" });
+  assert.doesNotThrow(() => new Function(`return ${expression};`));
+  assert.match(expression, /api\/auth\/session/);
+  assert.match(expression, /backend-api\/accounts\/check/);
 });
 
 test("ChatGPT shortlink payment button locator highlights without submitting", () => {

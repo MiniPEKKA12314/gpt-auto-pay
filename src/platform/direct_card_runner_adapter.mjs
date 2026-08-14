@@ -45,6 +45,8 @@ function compactResult(result = {}) {
         evidence: result.postClick.evidence,
         rawError: result.postClick.rawError,
         verificationType: result.postClick.verificationType,
+        source: result.postClick.source,
+        accountVerification: result.postClick.accountVerification,
       }
     : undefined;
   return {
@@ -137,6 +139,7 @@ export function buildDirectCardInputFromContext(context = {}, options = {}) {
     ),
     paymentCountry: firstString(options.paymentCountry, options.payment_country, plan.payment_country, plan.paymentCountry, "PH").toUpperCase(),
     paymentCurrency: firstString(options.paymentCurrency, options.payment_currency, plan.payment_currency, plan.paymentCurrency, "PHP").toUpperCase(),
+    targetPlanType: firstString(options.targetPlanType, options.target_plan_type, plan.plan_type, plan.planType).toLowerCase(),
     locatePaymentButton: boolOption(options.locatePaymentButton, true),
     clickPaymentButton: boolOption(options.clickPaymentButton, true),
     billing: {
@@ -246,8 +249,10 @@ export class DirectCardRunnerAdapter extends RunnerAdapter {
       proxyUrl,
       proxyChain,
       registerChildProcess: this.options.registerChildProcess,
-      postClickTimeoutMs: this.options.postClickTimeoutMs,
-      postClickPollMs: this.options.postClickPollMs,
+      postClickTimeoutMs: this.options.postClickTimeoutMs ?? 60_000,
+      postClickPollMs: this.options.postClickPollMs ?? 500,
+      accountVerificationTimeoutMs: this.options.accountVerificationTimeoutMs ?? 75_000,
+      accountVerificationPollMs: this.options.accountVerificationPollMs ?? 3_000,
     });
 
     const normalized = normalizeDirectCardRunnerResult(runnerResult);

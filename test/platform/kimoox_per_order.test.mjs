@@ -70,6 +70,9 @@ test("Kimoox per-order mode opens a new card, runs payment, then withdraws and c
       },
       async cashOutCard(input) {
         actions.push("cashout:" + input.amount);
+        if (input.amount === "12.33") {
+          throw new Error("Kimoox API HTTP 500: 转出金额不能大于可转出余额，最多可转出 12.32 USD");
+        }
         cashOutSubmitted = true;
         return { status: "PENDING", amount: input.amount, requestNo: input.requestNo };
       },
@@ -112,7 +115,8 @@ test("Kimoox per-order mode opens a new card, runs payment, then withdraws and c
       "balance:kc-1",
       "direct:kc-1",
       "balance:kc-1",
-      "cashout:12.34",
+      "cashout:12.33",
+      "cashout:12.32",
       "balance:kc-1",
       "cancel:kc-1",
       "balance:kc-1",

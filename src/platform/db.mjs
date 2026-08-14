@@ -46,6 +46,8 @@ function ensurePlatformMigrations(db) {
   ensureColumn(db, "plan_configs", "checkout_max_proxy_attempts", "INTEGER NOT NULL DEFAULT 4");
   ensureColumn(db, "plan_configs", "card_source", "TEXT NOT NULL DEFAULT 'local'");
   ensureColumn(db, "plan_configs", "vcc_target_balance_usd", "TEXT DEFAULT ''");
+  ensureColumn(db, "plan_configs", "remote_balance_success_fallback", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "plan_configs", "lock_redeem_code_on_failure", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "plan_configs", "vcc_card_bin", "TEXT DEFAULT ''");
   ensureColumn(db, "plan_configs", "vcc_open_email", "TEXT DEFAULT ''");
   ensureColumn(db, "plan_configs", "remote_max_cards", "INTEGER NOT NULL DEFAULT 1");
@@ -373,12 +375,12 @@ export class PlatformStore {
         plan_type, display_name, enabled, payment_country, payment_currency,
         checkout_template_key, card_source, checkout_proxy_group_id, direct_card_proxy_group_id,
         billing_group_id, failure_message, checkout_max_proxy_attempts, max_proxy_attempts_per_card,
-        vcc_target_balance_usd, vcc_card_bin, vcc_open_email, remote_max_cards,
+        vcc_target_balance_usd, remote_balance_success_fallback, lock_redeem_code_on_failure, vcc_card_bin, vcc_open_email, remote_max_cards,
         remote_success_withdraw, remote_success_final_action, remote_failure_withdraw, remote_failure_final_action,
         kimoox_issue_mode, kimoox_card_bin_id, kimoox_card_type,
         kimoox_holder_id, kimoox_card_group_id, kimoox_budget_id, kimoox_reclaim_balance,
         kimoox_cancel_after_order, allow_card_switch, max_card_switches, created_at, updated_at
-      ) VALUES (?, ?, ?, '', '', '', 'local', 0, 0, 0, '', 4, 4, '', '', '', 1, 1, 'cancel', 1, 'cancel', 'pool', '', 'PREPAID', '', '', '', 1, 1, 0, 0, ?, ?)
+      ) VALUES (?, ?, ?, '', '', '', 'local', 0, 0, 0, '', 4, 4, '', 0, 0, '', '', 1, 1, 'cancel', 1, 'cancel', 'pool', '', 'PREPAID', '', '', '', 1, 1, 0, 0, ?, ?)
     `);
     for (const [planType, displayName] of Object.entries(DEFAULT_PLAN_NAMES)) {
       insert.run(planType, displayName, 1, now, now);
@@ -392,12 +394,12 @@ export class PlatformStore {
         plan_type, display_name, enabled, payment_country, payment_currency,
         checkout_template_key, card_source, checkout_proxy_group_id, direct_card_proxy_group_id,
         billing_group_id, failure_message, checkout_max_proxy_attempts, max_proxy_attempts_per_card,
-        vcc_target_balance_usd, vcc_card_bin, vcc_open_email, remote_max_cards,
+        vcc_target_balance_usd, remote_balance_success_fallback, lock_redeem_code_on_failure, vcc_card_bin, vcc_open_email, remote_max_cards,
         remote_success_withdraw, remote_success_final_action, remote_failure_withdraw, remote_failure_final_action,
         kimoox_issue_mode, kimoox_card_bin_id, kimoox_card_type,
         kimoox_holder_id, kimoox_card_group_id, kimoox_budget_id, kimoox_reclaim_balance,
         kimoox_cancel_after_order, allow_card_switch, max_card_switches, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(plan_type) DO UPDATE SET
         display_name = excluded.display_name,
         enabled = excluded.enabled,
@@ -412,6 +414,8 @@ export class PlatformStore {
         checkout_max_proxy_attempts = excluded.checkout_max_proxy_attempts,
         max_proxy_attempts_per_card = excluded.max_proxy_attempts_per_card,
         vcc_target_balance_usd = excluded.vcc_target_balance_usd,
+        remote_balance_success_fallback = excluded.remote_balance_success_fallback,
+        lock_redeem_code_on_failure = excluded.lock_redeem_code_on_failure,
         vcc_card_bin = excluded.vcc_card_bin,
         vcc_open_email = excluded.vcc_open_email,
         remote_max_cards = excluded.remote_max_cards,
@@ -445,6 +449,8 @@ export class PlatformStore {
       config.checkout_max_proxy_attempts,
       config.max_proxy_attempts_per_card,
       config.vcc_target_balance_usd,
+      boolInt(config.remote_balance_success_fallback),
+      boolInt(config.lock_redeem_code_on_failure),
       config.vcc_card_bin,
       config.vcc_open_email,
       config.remote_max_cards,
@@ -1836,7 +1842,8 @@ export class PlatformStore {
     return createQueueSettings(this.getSystemJson("queue.settings", {
       status: QueueStatus.RUNNING,
       global_concurrency: 1,
-      pause_on_order_failure: false,
+      auto_pause_failure_count: 0,
+      failure_count: 0,
     }));
   }
 
@@ -1845,7 +1852,12 @@ export class PlatformStore {
     const next = createQueueSettings({
       status: input.status ?? current.status,
       global_concurrency: input.global_concurrency ?? input.globalConcurrency ?? current.global_concurrency,
-      pause_on_order_failure: input.pause_on_order_failure ?? input.pauseOnOrderFailure ?? current.pause_on_order_failure,
+      auto_pause_failure_count: input.auto_pause_failure_count
+        ?? input.autoPauseFailureCount
+        ?? (input.pause_on_order_failure !== undefined || input.pauseOnOrderFailure !== undefined
+          ? ((input.pause_on_order_failure ?? input.pauseOnOrderFailure) ? 1 : 0)
+          : current.auto_pause_failure_count),
+      failure_count: input.failure_count ?? input.failureCount ?? current.failure_count,
     });
     this.setSystemJson("queue.settings", next, adminId, now);
     return next;
@@ -1856,7 +1868,12 @@ export class PlatformStore {
   }
 
   resumeQueue(adminId = 1, now = nowSeconds()) {
-    return this.setQueueSettings({ status: QueueStatus.RUNNING }, adminId, now);
+    return this.setQueueSettings({ status: QueueStatus.RUNNING, failure_count: 0 }, adminId, now);
+  }
+
+  addQueueFailureCount(count = 1, adminId = 1, now = nowSeconds()) {
+    const current = this.getQueueSettings();
+    return this.setQueueSettings({ failure_count: current.failure_count + Math.max(0, Number(count) || 0) }, adminId, now);
   }
 
   orderCountsByStatus() {
@@ -1899,6 +1916,8 @@ export class PlatformStore {
     return {
       status: settings.status,
       concurrency: settings.global_concurrency,
+      auto_pause_failure_count: settings.auto_pause_failure_count,
+      failure_count: settings.failure_count,
       pause_on_order_failure: settings.pause_on_order_failure,
       queued: counts.queued ?? 0,
       running: counts.running ?? 0,
@@ -2068,6 +2087,9 @@ export class PlatformStore {
   markOrderFailedAndReleaseCode(orderId, fields = {}, now = nowSeconds()) {
     return runTransaction(this.db, () => {
       const order = this.getOrderById(orderId);
+      const lockCode = fields.lock_redeem_code_on_failure === true || fields.lock_redeem_code_on_failure === 1 || fields.lock_redeem_code_on_failure === "1";
+      const codeStatus = lockCode ? RedeemStatus.UNAVAILABLE : RedeemStatus.UNUSED;
+      const unavailableReason = String(fields.unavailable_reason ?? fields.unavailableReason ?? "充值失败后按套餐设置锁定兑换码");
       this.db.prepare(`
         UPDATE orders
            SET status = ?, public_message = ?, admin_error = ?,
@@ -2084,9 +2106,20 @@ export class PlatformStore {
       );
       this.db.prepare(`
         UPDATE redeem_codes
-           SET status = ?, locked_order_id = 0, locked_at = 0
+           SET status = ?, locked_order_id = 0, locked_at = 0,
+               unavailable_at = CASE WHEN ? THEN ? ELSE 0 END,
+               unavailable_reason = CASE WHEN ? THEN ? ELSE '' END
          WHERE id = ? AND status IN (?, ?)
-      `).run(RedeemStatus.UNUSED, order.redeem_code_id, RedeemStatus.LOCKED, RedeemStatus.UNAVAILABLE);
+      `).run(
+        codeStatus,
+        lockCode ? 1 : 0,
+        lockCode ? now : 0,
+        lockCode ? 1 : 0,
+        lockCode ? unavailableReason : "",
+        order.redeem_code_id,
+        RedeemStatus.LOCKED,
+        RedeemStatus.UNAVAILABLE,
+      );
       return {
         order: this.getOrderById(order.id),
         redeemCode: this.getRedeemCodeById(order.redeem_code_id),

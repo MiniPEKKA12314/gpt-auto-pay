@@ -215,6 +215,20 @@ export function renderAdminUi(options = {}) {
       font-size: 12px;
       font-weight: 800;
     }
+    .help-tip {
+      display: inline-flex;
+      width: 16px;
+      height: 16px;
+      margin-left: 4px;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #98a2b3;
+      border-radius: 50%;
+      color: #667085;
+      font-size: 11px;
+      line-height: 1;
+      cursor: help;
+    }
     input, textarea, select {
       width: 100%;
       border: 1px solid var(--line);
@@ -550,11 +564,11 @@ export function renderAdminUi(options = {}) {
               <span id="queueState" class="pill">unknown</span>
               <span id="queueWorkerState" class="pill">自动处理器未知</span>
               <input id="queueConcurrency" type="number" min="1" max="1000" style="width:120px">
-              <button id="saveQueueBtn">保存并发</button>
+              <button id="saveQueueBtn">保存</button>
               <button id="pauseQueueBtn">暂停</button>
               <button id="resumeQueueBtn" class="primary">恢复</button>
               <button id="processOnceBtn">处理一次</button>
-              <label style="margin:0"><input id="pauseOnFailure" type="checkbox" style="width:auto;height:auto"> 订单失败后自动暂停队列</label>
+              <label style="margin:0">累计失败自动暂停 <input id="autoPauseFailureCount" type="number" min="0" max="1000" value="0" style="width:90px"> 单（0 不限制）</label>
             </div>
             <pre id="queueOutput"></pre>
           </section>
@@ -683,6 +697,8 @@ export function renderAdminUi(options = {}) {
               <div><label>支付方式</label><select id="planCardSource" name="card_source"><option value="local">本地卡组</option><option value="vcc">VCC 每单新开卡</option><option value="kimoox">Kimoox 每单新开卡</option></select></div>
               <div class="plan-local-field full"><label>本地卡组</label><div id="planCardGroupsList" class="check-list"></div></div>
               <div class="plan-remote-field"><label>远程卡目标余额（USD）</label><input id="planVccTargetBalanceUsd" name="vcc_target_balance_usd" inputmode="decimal" placeholder="例如 25.00；远程卡开卡/补余额生效，全部按 USD"></div>
+              <div class="plan-remote-field"><label>余额下降成功兜底 <span class="help-tip" tabindex="0" title="开启后，付款页面未确认成功时，若付款后卡余额比付款前减少超过 50%，系统将按充值成功处理。仅适用于 VCC/Kimoox 远程卡。" aria-label="余额下降成功兜底说明">?</span></label><select id="planRemoteBalanceSuccessFallback" name="remote_balance_success_fallback"><option value="0">关闭</option><option value="1">开启</option></select></div>
+              <div><label>充值失败后锁定兑换码 <span class="help-tip" tabindex="0" title="开启后，即使本订单最终失败，兑换码也会标记为不可用，管理员核对后再决定是否恢复；关闭则失败后返还为未使用。" aria-label="充值失败后锁定兑换码说明">?</span></label><select id="planLockRedeemOnFailure" name="lock_redeem_code_on_failure"><option value="0">关闭：失败后返还</option><option value="1">开启：失败后锁定</option></select></div>
               <div class="plan-remote-field"><label>本订单最多开卡数</label><input id="planRemoteMaxCards" name="remote_max_cards" type="number" min="1" max="1000" placeholder="例如 2"></div>
               <div class="plan-vcc-field"><label>VCC 开卡 BIN</label><input id="planVccCardBin" name="vcc_card_bin" placeholder="点击卡池里的 VCC 拉取 BIN 后填入"></div>
               <div class="plan-vcc-field"><label>VCC 开卡邮箱</label><input id="planVccOpenEmail" name="vcc_open_email" placeholder="可留空"></div>
@@ -1191,7 +1207,7 @@ export function renderAdminUi(options = {}) {
         "并发：" + (queue.concurrency || 1),
         "排队：" + (queue.queued || 0),
         "运行：" + (queue.running || 0),
-        "失败后自动暂停：" + (queue.pause_on_order_failure ? "开启" : "关闭")
+        "累计失败自动暂停：" + (queue.auto_pause_failure_count > 0 ? (queue.failure_count || 0) + "/" + queue.auto_pause_failure_count + " 单" : "不限制")
       ];
       if (worker.last_event) {
         parts.push("最近处理：" + JSON.stringify(worker.last_event));
@@ -1462,6 +1478,11 @@ export function renderAdminUi(options = {}) {
       return ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
     }
 
+    function hasActiveTextSelection() {
+      const selection = window.getSelection ? window.getSelection() : null;
+      return Boolean(selection && selection.rangeCount && !selection.isCollapsed && selection.toString());
+    }
+
     function stopAutoRefresh() {
       if (state.autoRefreshTimer) window.clearInterval(state.autoRefreshTimer);
       state.autoRefreshTimer = null;
@@ -1605,6 +1626,7 @@ export function renderAdminUi(options = {}) {
     async function refreshRealtimeData(options = {}) {
       if (!state.admin || state.autoRefreshBusy) return;
       if (document.hidden && options.force !== true) return;
+      if (options.force !== true && (isEditingField() || hasActiveTextSelection())) return;
       state.autoRefreshBusy = true;
       const focused = isEditingField();
       const tab = state.tab;
@@ -1644,6 +1666,8 @@ export function renderAdminUi(options = {}) {
           jobs.push(safeLoad("审计日志", loadAudits, { quiet: true }));
         }
         await Promise.all(jobs);
+
+        if (options.force !== true && (isEditingField() || hasActiveTextSelection())) return;
 
         renderOverview();
         if (tab === "overview" && state.openOrderDetailId && !selectionInsideOrderDetail()) await showOrderDetails(state.openOrderDetailId, { quiet: true });
@@ -1865,7 +1889,7 @@ export function renderAdminUi(options = {}) {
       $("queueWorkerState").textContent = workerStatusLabel(queue.worker);
       $("queueWorkerState").className = "pill " + (queue.worker && queue.worker.enabled && queue.worker.started ? "ok" : "warn");
       if (document.activeElement !== $("queueConcurrency")) $("queueConcurrency").value = queue.concurrency || 1;
-      if ($("pauseOnFailure") && document.activeElement !== $("pauseOnFailure")) $("pauseOnFailure").checked = Boolean(queue.pause_on_order_failure);
+      if ($("autoPauseFailureCount") && document.activeElement !== $("autoPauseFailureCount")) $("autoPauseFailureCount").value = queue.auto_pause_failure_count ?? 0;
       $("queueOutput").textContent = queueSummaryText(queue);
       setScrollableHtml("liveRunLogsOutput", formatDashboardRunLogs(dashboard.recent_logs || []));
       const queuedOrders = Array.isArray(dashboard.queued_orders)
@@ -1926,6 +1950,8 @@ export function renderAdminUi(options = {}) {
       $("planMaxProxy").value = plan.max_proxy_attempts_per_card || 4;
       $("planCardSource").value = plan.card_source || (plan.kimoox_issue_mode === "per_order" ? "kimoox" : "local");
       $("planVccTargetBalanceUsd").value = plan.vcc_target_balance_usd || "";
+      $("planRemoteBalanceSuccessFallback").value = plan.remote_balance_success_fallback ? "1" : "0";
+      $("planLockRedeemOnFailure").value = plan.lock_redeem_code_on_failure ? "1" : "0";
       $("planRemoteMaxCards").value = plan.remote_max_cards || 1;
       $("planVccCardBin").value = plan.vcc_card_bin || "";
       $("planVccOpenEmail").value = plan.vcc_open_email || "";
@@ -2129,7 +2155,7 @@ export function renderAdminUi(options = {}) {
         method: "PATCH",
         body: JSON.stringify({
           global_concurrency: numeric($("queueConcurrency").value, 1),
-          pause_on_order_failure: $("pauseOnFailure").checked
+          auto_pause_failure_count: numeric($("autoPauseFailureCount").value, 0)
         })
       });
       $("queueOutput").textContent = JSON.stringify(result, null, 2);
@@ -2225,6 +2251,8 @@ export function renderAdminUi(options = {}) {
         max_proxy_attempts_per_card: numeric($("planMaxProxy").value, 4),
         card_source: $("planCardSource").value,
         vcc_target_balance_usd: $("planVccTargetBalanceUsd").value,
+        remote_balance_success_fallback: $("planRemoteBalanceSuccessFallback").value === "1",
+        lock_redeem_code_on_failure: $("planLockRedeemOnFailure").value === "1",
         vcc_card_bin: $("planVccCardBin").value,
         vcc_open_email: $("planVccOpenEmail").value,
         remote_max_cards: numeric($("planRemoteMaxCards").value, 1),
@@ -2979,7 +3007,7 @@ export function renderAdminUi(options = {}) {
     $("loginForm").addEventListener("submit", login);
     clickWithFeedback("logoutBtn", "正在退出...", logout);
     clickWithFeedback("refreshBtn", "正在刷新数据...", refreshAll, "数据已刷新");
-    clickWithFeedback("saveQueueBtn", "正在保存并发...", saveQueue);
+    clickWithFeedback("saveQueueBtn", "正在保存队列配置...", saveQueue, "队列配置已保存");
     clickWithFeedback("pauseQueueBtn", "正在暂停队列...", function() { return queueAction("/api/admin/queue/pause"); });
     clickWithFeedback("resumeQueueBtn", "正在恢复队列...", function() { return queueAction("/api/admin/queue/resume"); });
     clickWithFeedback("processOnceBtn", "正在处理一次队列...", function() { return queueAction("/api/admin/queue/process-once"); });

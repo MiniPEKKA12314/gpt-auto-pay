@@ -46,7 +46,17 @@ function manualEffectivePlan(plan, manualOptions) {
   };
 }
 
-async function failOrder(store, orderId, attemptId, message, stage = "runner", now) {
+function failureCodeFields(plan = {}) {
+  const lockCode = plan.lock_redeem_code_on_failure === true
+    || plan.lock_redeem_code_on_failure === 1
+    || plan.lock_redeem_code_on_failure === "1";
+  return {
+    lock_redeem_code_on_failure: lockCode,
+    unavailable_reason: "订单失败后按套餐设置锁定兑换码",
+  };
+}
+
+async function failOrder(store, orderId, attemptId, message, stage = "runner", now, plan = {}) {
   store.updateOrderAttempt(attemptId, {
     status: "failed",
     stage,
@@ -62,6 +72,7 @@ async function failOrder(store, orderId, attemptId, message, stage = "runner", n
   }, now);
   return store.markOrderFailedAndReleaseCode(orderId, {
     admin_error: message,
+    ...failureCodeFields(plan),
   }, now);
 }
 
@@ -190,7 +201,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
     return {
       ok: false,
       result: resultFailed("没有可用卡"),
-      ...await failOrder(store, order.id, attemptId, "没有可用卡", "select_card", now()),
+      ...await failOrder(store, order.id, attemptId, "没有可用卡", "select_card", now(), plan),
     };
   }
 
@@ -198,7 +209,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
     return {
       ok: false,
       result: resultFailed("没有可用账单地址"),
-      ...await failOrder(store, order.id, attemptId, "没有可用账单地址", "select_billing", now()),
+      ...await failOrder(store, order.id, attemptId, "没有可用账单地址", "select_billing", now(), plan),
     };
   }
 
@@ -255,7 +266,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
   const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
   runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
   const message = runnerResult?.message || runnerResult?.error || "runner failed";
-  const failed = await failOrder(store, order.id, attemptId, message, "runner", now());
+  const failed = await failOrder(store, order.id, attemptId, message, "runner", now(), plan);
   return {
     ok: false,
     result: runnerResult,
@@ -353,7 +364,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
         error_code: "NO_BILLING_ADDRESS",
         error_message: "没有可用账单地址",
       }, now());
-      const failed = await failOrder(store, order.id, attemptId, "没有可用账单地址", "select_billing", now());
+      const failed = await failOrder(store, order.id, attemptId, "没有可用账单地址", "select_billing", now(), plan);
       return {
         ok: false,
         result: resultFailed("没有可用账单地址", { code: "NO_BILLING_ADDRESS" }),
@@ -380,7 +391,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
           error_code: "NO_CARD_AVAILABLE",
           error_message: "没有可用卡",
         }, now());
-        const failed = await failOrder(store, order.id, attemptId, "没有可用卡", "select_card", now());
+        const failed = await failOrder(store, order.id, attemptId, "没有可用卡", "select_card", now(), plan);
         return {
           ok: false,
           result: resultFailed("没有可用卡", { code: "NO_CARD_AVAILABLE" }),
@@ -553,6 +564,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     const cleanupSuffix = cleanup?.ok === false ? `?Kimoox ???????: ${(cleanup.errors || []).join("; ")}` : "";
     const failed = store.markOrderFailedAndReleaseCode(order.id, {
       admin_error: message + cleanupSuffix,
+      ...failureCodeFields(plan),
     }, now());
     return {
       ok: false,
@@ -583,7 +595,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     error_message: message,
   }, now());
   const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
-  const failed = await failOrder(store, order.id, attemptId, message + (cleanup?.ok === false ? `；远程临时卡收尾失败: ${(cleanup.errors || []).join("; ")}` : ""), "retry_guard", now());
+  const failed = await failOrder(store, order.id, attemptId, message + (cleanup?.ok === false ? `；远程临时卡收尾失败: ${(cleanup.errors || []).join("; ")}` : ""), "retry_guard", now(), plan);
   return {
     ok: false,
     result: resultFailed(message, { code: "RETRY_GUARD_EXHAUSTED" }),

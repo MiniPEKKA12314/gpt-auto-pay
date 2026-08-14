@@ -39,3 +39,41 @@ test("queue can pause automatically after an exhausted order failure", async () 
     store.close();
   }
 });
+
+test("queue pauses after the configured cumulative failure count", async () => {
+  const { store } = createQueuedStore();
+  try {
+    store.setQueueSettings({ global_concurrency: 1, auto_pause_failure_count: 2 }, 1, 30);
+    const adapter = async () => ({
+      async execute() {
+        return { ok: false, status: "failed", code: "DIRECT_CARD_FAILED", message: "test failure" };
+      },
+    });
+    const first = await runQueueOnce(store, adapter, { now: () => 40 });
+    assert.equal(first.paused_on_failure, false);
+    assert.equal(store.getQueueSettings().failure_count, 1);
+    const second = await runQueueOnce(store, adapter, { now: () => 50 });
+    assert.equal(second.paused_on_failure, true);
+    assert.equal(store.getQueueSettings().failure_count, 2);
+    assert.equal(store.getQueueSettings().status, "paused");
+  } finally {
+    store.close();
+  }
+});
+
+test("failed order locks the redeem code when the plan enables failure locking", async () => {
+  const { store } = createQueuedStore();
+  try {
+    store.upsertPlanConfig({ ...store.getPlanConfig("plus"), lock_redeem_code_on_failure: true }, 29);
+    const result = await runQueueOnce(store, async () => ({
+      async execute() {
+        return { ok: false, status: "failed", code: "DIRECT_CARD_DECLINED", message: "Payment was not approved" };
+      },
+    }), { now: () => 40 });
+    const code = store.getRedeemCodeByDisplay("PLUS-PAUSE-0");
+    assert.equal(result.results[0].ok, false);
+    assert.equal(code.status, "unavailable");
+  } finally {
+    store.close();
+  }
+});

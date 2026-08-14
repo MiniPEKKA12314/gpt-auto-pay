@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS plan_configs (
   checkout_max_proxy_attempts INTEGER NOT NULL DEFAULT 4,
   max_proxy_attempts_per_card INTEGER NOT NULL DEFAULT 4,
   vcc_target_balance_usd TEXT DEFAULT '',
+  remote_balance_success_fallback INTEGER NOT NULL DEFAULT 0,
+  lock_redeem_code_on_failure INTEGER NOT NULL DEFAULT 0,
   vcc_card_bin TEXT DEFAULT '',
   vcc_open_email TEXT DEFAULT '',
   remote_max_cards INTEGER NOT NULL DEFAULT 1,

@@ -15,17 +15,20 @@ function failingAdapter(error) {
 
 function pauseQueueAfterFailureIfEnabled(store, result = {}, now = defaultNow()) {
   const settings = store.getQueueSettings();
-  if (!settings.pause_on_order_failure) return null;
-  const failed = Array.isArray(result.results) ? result.results.find((row) => row.ok !== true) : null;
-  if (!failed) return null;
+  const failedResults = Array.isArray(result.results) ? result.results.filter((row) => row.ok !== true) : [];
+  if (!failedResults.length) return null;
+  const failureCount = store.addQueueFailureCount(failedResults.length, 1, now);
+  const threshold = Number(settings.auto_pause_failure_count || 0);
+  if (threshold <= 0 || failureCount.failure_count < threshold) return null;
+  const failed = failedResults[failedResults.length - 1];
   const after = store.pauseQueue(1, now);
   store.addRunLog({
     order_id: failed.order_id,
     attempt_id: 0,
     level: "error",
     stage: "queue_pause",
-    message: "订单在当前重试策略内已失败，队列已按设置自动暂停，等待管理员处理后再恢复。",
-    meta: { order_no: failed.order_no, result: failed.result },
+    message: `累计失败 ${failureCount.failure_count} 单，已达到阈值 ${threshold}，队列自动暂停，等待管理员处理后再恢复。`,
+    meta: { order_no: failed.order_no, result: failed.result, failure_count: failureCount.failure_count, threshold },
   }, now);
   return after;
 }

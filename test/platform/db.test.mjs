@@ -351,3 +351,20 @@ test("store controls queue settings, dispatch, termination, and interrupted reso
   assert.equal(returned.order.status, "failed");
   assert.equal(returned.redeemCode.status, "unused");
 }));
+
+test("failed order can keep its redeem code unavailable when the plan enables locking", () => withStore((store) => {
+  store.createRedeemBatchWithCodes({
+    name: "locked failure batch",
+    plan_type: "plus",
+    quantity: 1,
+    codeFactory: () => "PLUS-LOCK-FAILURE",
+  }, 110);
+  const locked = store.lockCodeAndCreateOrder({ code: "PLUS-LOCK-FAILURE", order_no: "ord_lock_failure" }, 111);
+  const failed = store.markOrderFailedAndReleaseCode(locked.order.id, {
+    admin_error: "payment uncertain",
+    lock_redeem_code_on_failure: true,
+  }, 112);
+  assert.equal(failed.order.status, OrderStatus.FAILED);
+  assert.equal(failed.redeemCode.status, RedeemStatus.UNAVAILABLE);
+  assert.match(failed.redeemCode.unavailable_reason, /锁定兑换码/);
+}));

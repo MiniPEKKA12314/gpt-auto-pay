@@ -183,6 +183,50 @@ function operationRequestNo(prefix = "KO", order = {}, card = {}) {
   return text.length >= 8 ? text : `${prefix}_${Date.now()}`.slice(0, 64);
 }
 
+function extractCashOutLimitCents(error) {
+  const text = String(error?.message || error || "");
+  const match = text.match(/最多可转出\s*([0-9]+(?:\.\d+)?)/i)
+    || text.match(/(?:maximum|max|limit)[^0-9]*([0-9]+(?:\.\d+)?)/i);
+  return match ? moneyToCents(match[1]) : null;
+}
+
+async function submitCashOutWithLimitRetry(provider, target, balanceCents, order, card, emit, source) {
+  let amountCents = source === "kimoox"
+    ? Math.max(0, Number(balanceCents) - 1)
+    : Math.max(0, Number(balanceCents));
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (amountCents <= 0) return { skipped: true, amount: "0.00", attempts: attempt };
+    const amount = centsToUsd(amountCents);
+    const requestNo = operationRequestNo(attempt === 0 ? "CW" : "CWR", order, card);
+    try {
+      const cashOut = await provider.cashOutCard({ cardId: target.cardId, amount, requestNo });
+      emit({
+        level: "info",
+        stage: "kimoox_cleanup",
+        message: `${cardProviderLabel(source)} 剩余余额转出请求已提交: ${amount} USD requestNo=${requestNo}${attempt ? `（按卡台返回上限重试）` : ""}`,
+        meta: { amount, requestNo, attempt: attempt + 1, result: cashOut },
+      });
+      return { cashOut, amount, requestNo, attempts: attempt + 1 };
+    } catch (error) {
+      lastError = error;
+      const limitCents = extractCashOutLimitCents(error);
+      if (attempt === 0 && Number.isInteger(limitCents) && limitCents > 0 && limitCents < amountCents) {
+        amountCents = limitCents;
+        emit({
+          level: "warn",
+          stage: "kimoox_cleanup",
+          message: `${cardProviderLabel(source)} 转出金额超过卡台可用余额，按卡台返回上限 ${centsToUsd(limitCents)} USD 重试`,
+          meta: { requested_amount: amount, retry_amount: centsToUsd(limitCents), error: error.message || String(error) },
+        });
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError || new Error("余额转出失败");
+}
+
 function remoteCardState(card = {}) {
   return String(card.state ?? card.cardStatus ?? card.status ?? card.card_status ?? "").trim().toUpperCase();
 }
@@ -689,11 +733,14 @@ export async function cleanupKimooxPerOrderCard(context = {}) {
       const balance = await queryRemoteBalanceWithProvider(provider, card);
       result.balance = balance;
       if (balance.balance_cents > 0) {
-        const amount = balance.balance_usd;
-        const requestNo = operationRequestNo("CW", context.order ?? {}, card);
-        result.cash_out = await provider.cashOutCard({ cardId: target.cardId, amount, requestNo });
-        emit({ level: "info", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 剩余余额转出请求已提交: ${amount} USD requestNo=${requestNo}`, meta: { amount, requestNo, result: result.cash_out } });
-        result.cash_out_confirm = await waitForKimooxBalanceAtMost(provider, card, 0, emit, { timeoutMs, requestNo, amount });
+        const cashOut = await submitCashOutWithLimitRetry(provider, target, balance.balance_cents, context.order ?? {}, card, emit, source);
+        if (!cashOut.skipped) {
+          result.cash_out = cashOut.cashOut;
+          result.cash_out_amount = cashOut.amount;
+          result.cash_out_attempts = cashOut.attempts;
+          const expectedRemainingCents = Math.max(0, balance.balance_cents - Number(moneyToCents(cashOut.amount) || 0));
+          result.cash_out_confirm = await waitForKimooxBalanceAtMost(provider, card, expectedRemainingCents, emit, { timeoutMs, requestNo: cashOut.requestNo, amount: cashOut.amount });
+        }
       } else {
         emit({ level: "success", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 卡余额为 0，余额转出确认完成`, meta: balance });
       }

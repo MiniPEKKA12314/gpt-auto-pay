@@ -84,6 +84,7 @@ test("direct card input builder maps platform resources into legacy runner input
   assert.equal(input.sessionToken, "session-token");
   assert.equal(input.paymentCountry, "PH");
   assert.equal(input.paymentCurrency, "PHP");
+  assert.equal(input.targetPlanType, "plus");
   assert.equal(input.clickPaymentButton, true);
   assert.equal(input.locatePaymentButton, true);
   assert.deepEqual(input.billing.address, {
@@ -178,6 +179,9 @@ test("direct card adapter calls injected runner with mapped card input", async (
   assert.equal(observed.proxyUrl, "socks5://user:pass@example.com:1080");
   assert.equal(observed.card.checkoutInput, "https://chatgpt.com/checkout/openai_llc/oaics_demo456");
   assert.equal(observed.card.sessionToken, "session-token");
+  assert.equal(observed.card.targetPlanType, "plus");
+  assert.equal(observed.postClickTimeoutMs, 60_000);
+  assert.equal(observed.accountVerificationTimeoutMs, 75_000);
   assert.equal(observed.card.billing.address.country, "US");
   assert.match(events.map((event) => event.message).join("\n"), /fake fill log/);
   assert.match(events.map((event) => event.message).join("\n"), /订阅成功/);
