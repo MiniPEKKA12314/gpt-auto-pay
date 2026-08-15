@@ -190,13 +190,7 @@ export function renderDevUi(options = {}) {
       <section>
         <h2>用户前台测试</h2>
         <label for="codeInput">兑换码</label>
-        <input id="codeInput" value="PLUS-LOCAL-0001" autocomplete="off">
-        <div class="row seed">
-          <button data-code="GO-LOCAL-0001">GO</button>
-          <button data-code="PLUS-LOCAL-0001">PLUS</button>
-          <button data-code="PRO5X-LOCAL-0001">PRO5X</button>
-          <button data-code="PRO20X-LOCAL-0001">PRO20X</button>
-        </div>
+        <input id="codeInput" autocomplete="off" placeholder="输入已生成的兑换码">
         <label for="orderInput">订单号</label>
         <input id="orderInput" autocomplete="off">
         <div class="row" style="margin-top:12px">
@@ -363,9 +357,6 @@ export function renderDevUi(options = {}) {
       append($('adminOutput'), '[sse] closed');
     }
 
-    document.querySelectorAll('[data-code]').forEach((button) => {
-      button.addEventListener('click', () => { $('codeInput').value = button.dataset.code; });
-    });
     $('redeemBtn').addEventListener('click', redeem);
     $('recoverBtn').addEventListener('click', recover);
     $('statusBtn').addEventListener('click', orderStatus);

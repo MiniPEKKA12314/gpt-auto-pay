@@ -1,4 +1,6 @@
 import { createServer } from "node:http";
+import { existsSync, readFileSync } from "node:fs";
+import { extname, join, relative, resolve } from "node:path";
 import { URL } from "node:url";
 
 import { renderAdminUi } from "./admin_ui.mjs";
@@ -21,6 +23,54 @@ import { checkPlanRuntimeReadiness } from "./runtime_readiness.mjs";
 import { PlatformQueueWorker, runQueueOnce } from "./worker.mjs";
 
 const JSON_TYPE = "application/json; charset=utf-8";
+const LEGACY_ADMIN_ENTRY_KEY = "admin.legacy_entry";
+const DEFAULT_LEGACY_ADMIN_SUFFIX = "legacy-console";
+
+const ADMIN_ASSET_TYPES = {
+  ".css": "text/css; charset=utf-8",
+  ".gif": "image/gif",
+  ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
+  ".jpg": "image/jpeg",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+function adminUiDistPath(options = {}) {
+  return resolve(options.adminUiDist ?? process.env.ADMIN_UI_DIST ?? join(process.cwd(), "admin-ui", "dist"));
+}
+
+function sendAdminFile(res, filePath, contentType, cacheControl = "public, max-age=31536000, immutable") {
+  const body = readFileSync(filePath);
+  res.writeHead(200, { "content-type": contentType, "cache-control": cacheControl, "content-length": body.length });
+  res.end(body);
+}
+
+function serveAdminUi(res, pathname, options = {}) {
+  const dist = adminUiDistPath(options);
+  const indexPath = join(dist, "index.html");
+  if (!existsSync(indexPath)) return false;
+  const requested = pathname === "/admin" || pathname === "/admin/"
+    ? indexPath
+    : join(dist, pathname.slice("/admin/".length));
+  const normalizedDist = resolve(dist);
+  const normalizedRequested = resolve(requested);
+  const isInsideDist = normalizedRequested === normalizedDist || relative(normalizedDist, normalizedRequested) && !relative(normalizedDist, normalizedRequested).startsWith("..") && !relative(normalizedDist, normalizedRequested).includes(":");
+  if (isInsideDist && existsSync(normalizedRequested)) {
+    const type = ADMIN_ASSET_TYPES[extname(normalizedRequested).toLowerCase()];
+    if (type) {
+      sendAdminFile(res, normalizedRequested, type, pathname.includes("/assets/") ? undefined : "no-store");
+      return true;
+    }
+  }
+  sendAdminFile(res, indexPath, ADMIN_ASSET_TYPES[".html"], "no-store");
+  return true;
+}
 
 function sendText(res, statusCode, text, contentType = "text/plain; charset=utf-8") {
   res.writeHead(statusCode, {
@@ -98,7 +148,12 @@ function isHostAllowed(host, allowedHosts) {
 }
 
 function isAdminPath(pathname) {
-  return pathname === "/admin" || pathname.startsWith("/admin/") || pathname === "/api/admin" || pathname.startsWith("/api/admin/");
+  return pathname === "/admin"
+    || pathname.startsWith("/admin/")
+    || pathname === "/admin-legacy"
+    || pathname.startsWith("/admin-legacy/")
+    || pathname === "/api/admin"
+    || pathname.startsWith("/api/admin/");
 }
 
 function isPublicOnlyBlockedPath(pathname) {
@@ -203,11 +258,27 @@ function requireAdmin(req, res, adminToken, url) {
   }
   sendError(res, 401, "ADMIN_UNAUTHORIZED", "管理员未登录");
   return false;
-  if (!adminToken) return true;
-  if (req.headers["x-admin-token"] === adminToken) return true;
-  if (url?.searchParams?.get("token") === adminToken) return true;
-  sendError(res, 401, "ADMIN_UNAUTHORIZED", "管理员未登录");
-  return false;
+}
+
+function normalizeLegacyAdminSuffix(value) {
+  const suffix = String(value ?? "").trim();
+  if (!/^[A-Za-z0-9_-]{3,64}$/.test(suffix)) {
+    throw new PlatformStoreError(
+      "LEGACY_ENTRY_SUFFIX_INVALID",
+      "入口字符串需为 3-64 位字母、数字、短横线或下划线",
+    );
+  }
+  return suffix;
+}
+
+function legacyAdminEntrySettings(store) {
+  const stored = store.getSystemJson(LEGACY_ADMIN_ENTRY_KEY, {});
+  const suffix = normalizeLegacyAdminSuffix(stored.suffix || DEFAULT_LEGACY_ADMIN_SUFFIX);
+  return {
+    enabled: stored.enabled !== false,
+    suffix,
+    path: `/admin-legacy/${suffix}`,
+  };
 }
 
 function rateLimit(res, limiter, key, limit, windowMs) {
@@ -536,7 +607,19 @@ export function createPlatformRequestHandler(options = {}) {
         return;
       }
 
-      if (req.method === "GET" && url.pathname === "/admin") {
+      if (req.method === "GET" && (url.pathname === "/admin" || url.pathname.startsWith("/admin/"))) {
+        if (!serveAdminUi(res, url.pathname, options)) {
+          sendText(res, 200, renderAdminUi(), "text/html; charset=utf-8");
+        }
+        return;
+      }
+
+      if (req.method === "GET" && (url.pathname === "/admin-legacy" || url.pathname.startsWith("/admin-legacy/"))) {
+        const legacyEntry = legacyAdminEntrySettings(store);
+        if (!legacyEntry.enabled || url.pathname !== legacyEntry.path) {
+          sendError(res, 404, "NOT_FOUND", "接口不存在");
+          return;
+        }
         sendText(res, 200, renderAdminUi(), "text/html; charset=utf-8");
         return;
       }
@@ -1266,6 +1349,9 @@ export function createPlatformRequestHandler(options = {}) {
           max_success_count: body.max_success_count ?? body.maxSuccessCount,
           status: body.status ?? "enabled",
           note_prefix: body.note_prefix ?? body.notePrefix ?? "vcc",
+          auto_unfreeze_before_use: body.auto_unfreeze_before_use ?? body.autoUnfreezeBeforeUse ?? 1,
+          auto_freeze_after_success: body.auto_freeze_after_success ?? body.autoFreezeAfterSuccess ?? 1,
+          auto_freeze_after_failure: body.auto_freeze_after_failure ?? body.autoFreezeAfterFailure ?? 1,
         });
         adminAudit(store, req, {
           action: "card_provider_vcc_import",
@@ -1861,9 +1947,47 @@ export function createPlatformRequestHandler(options = {}) {
           "connection": "keep-alive",
           "x-accel-buffering": "no",
         });
-        writeSse(res, "queue.snapshot", dashboardSnapshotWithWorker(store, workerStatusProvider).queue);
-        const heartbeat = setInterval(() => writeSse(res, "ping", {}), 15_000);
-        req.on("close", () => clearInterval(heartbeat));
+        const pushSnapshot = () => {
+          const snapshot = dashboardSnapshotWithWorker(store, workerStatusProvider);
+          writeSse(res, "dashboard.snapshot", snapshot);
+        };
+        const initialSnapshot = dashboardSnapshotWithWorker(store, workerStatusProvider);
+        writeSse(res, "queue.snapshot", initialSnapshot.queue);
+        writeSse(res, "dashboard.snapshot", initialSnapshot);
+        const snapshotIntervalMs = Math.max(1_000, Number(options.adminEventIntervalMs ?? 2_000));
+        const snapshotTimer = setInterval(pushSnapshot, snapshotIntervalMs);
+        const heartbeat = setInterval(() => writeSse(res, "ping", { at: Date.now() }), 15_000);
+        req.on("close", () => {
+          clearInterval(snapshotTimer);
+          clearInterval(heartbeat);
+        });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/admin/legacy-entry") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        sendJson(res, 200, { ok: true, data: legacyAdminEntrySettings(store) });
+        return;
+      }
+
+      if (req.method === "PATCH" && url.pathname === "/api/admin/legacy-entry") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const before = legacyAdminEntrySettings(store);
+        const body = await readJson(req);
+        const suffix = normalizeLegacyAdminSuffix(body.suffix ?? before.suffix);
+        store.setSystemJson(LEGACY_ADMIN_ENTRY_KEY, {
+          enabled: body.enabled === undefined ? before.enabled : Boolean(body.enabled),
+          suffix,
+        }, req.platformAdmin.id);
+        const after = legacyAdminEntrySettings(store);
+        adminAudit(store, req, {
+          action: "legacy_admin_entry_update",
+          target_type: "system_setting",
+          target_id: LEGACY_ADMIN_ENTRY_KEY,
+          before,
+          after,
+        });
+        sendJson(res, 200, { ok: true, data: after });
         return;
       }
 

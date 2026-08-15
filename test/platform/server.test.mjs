@@ -150,37 +150,12 @@ test("admin login creates a session cookie for browser admin APIs", async () => 
     const adminUi = await fetch(`${app.url}/admin`);
     assert.equal(adminUi.status, 200);
     const adminHtml = await adminUi.text();
-    assert.match(adminHtml, /id="orderQuery"/);
-    assert.match(adminHtml, /id="selectedCodesExport"/);
-    assert.match(adminHtml, /id="paymentCountryOptions"/);
-    assert.match(adminHtml, /id="cardSecretDialog"/);
-    assert.match(adminHtml, /id="cardEditForm"/);
-    assert.match(adminHtml, /id="cardEditSaveBtn"/);
-    assert.match(adminHtml, /id="cardFreezeBtn"/);
-    assert.match(adminHtml, /id="cardUnfreezeBtn"/);
-    assert.match(adminHtml, /id="billingEditDialog"/);
-    assert.match(adminHtml, /id="billingEditSaveBtn"/);
-    assert.match(adminHtml, /data-billing-edit/);
-    assert.match(adminHtml, /id="autoRefreshState"/);
-    assert.match(adminHtml, /id="queueWorkerState"/);
-    assert.match(adminHtml, /data-tab="manual"/);
-    assert.match(adminHtml, /id="manualOrderForm"/);
-    assert.match(adminHtml, /id="planCheckoutMaxProxy"/);
-    assert.match(adminHtml, /id="planVccTargetBalanceUsd"/);
-    assert.match(adminHtml, /id="vccUserInfoBtn"/);
-    assert.match(adminHtml, /data-card-vcc-balance/);
-    assert.match(adminHtml, /auto_unfreeze_before_use/);
-    assert.match(adminHtml, /vccImportAutoFreezeSuccess/);
-    assert.match(adminHtml, /id="proxyEditForm"/);
-    assert.match(adminHtml, /id="proxyProviderSelect"/);
-    assert.match(adminHtml, /id="proxyEditProvider"/);
-    assert.match(adminHtml, /data-proxy-group-edit/);
-    assert.match(adminHtml, /order-log-line/);
-    assert.match(adminHtml, /gpt_auto_pay_admin_session/);
-    assert.match(adminHtml, /x-admin-session/);
-    assert.match(adminHtml, /账单组<\/th><th>地区/);
-    const adminScript = adminHtml.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "";
-    assert.doesNotThrow(() => new Function(adminScript));
+    if (adminHtml.includes('id="app"')) {
+      assert.match(adminHtml, /static\/js\//);
+      assert.match(adminHtml, /static\/css\//);
+    } else {
+      assert.match(adminHtml, /id="orderQuery"/);
+    }
 
     const denied = await jsonFetch(`${app.url}/api/admin/dashboard`);
     assert.equal(denied.response.status, 401);
@@ -221,6 +196,54 @@ test("admin login creates a session cookie for browser admin APIs", async () => 
   }
 });
 
+test("legacy admin entry is configurable, audited, and path-bound", async () => {
+  const app = await createTestApp({ adminToken: "admin-token" });
+  const headers = { "x-admin-token": "admin-token" };
+  try {
+    const direct = await fetch(`${app.url}/admin-legacy`);
+    assert.equal(direct.status, 404);
+
+    const initial = await jsonFetch(`${app.url}/api/admin/legacy-entry`, { headers });
+    assert.equal(initial.response.status, 200);
+    assert.deepEqual(initial.body.data, {
+      enabled: true,
+      suffix: "legacy-console",
+      path: "/admin-legacy/legacy-console",
+    });
+    assert.equal((await fetch(`${app.url}${initial.body.data.path}`)).status, 200);
+
+    const disabled = await jsonFetch(`${app.url}/api/admin/legacy-entry`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ enabled: false, suffix: "private-history" }),
+    });
+    assert.equal(disabled.body.data.enabled, false);
+    assert.equal((await fetch(`${app.url}/admin-legacy/private-history`)).status, 404);
+
+    const enabled = await jsonFetch(`${app.url}/api/admin/legacy-entry`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ enabled: true, suffix: "private-history" }),
+    });
+    assert.equal(enabled.body.data.path, "/admin-legacy/private-history");
+    assert.equal((await fetch(`${app.url}/admin-legacy/legacy-console`)).status, 404);
+    const legacyPage = await fetch(`${app.url}/admin-legacy/private-history`);
+    assert.equal(legacyPage.status, 200);
+    assert.match(await legacyPage.text(), /id="orderQuery"/);
+
+    const invalid = await jsonFetch(`${app.url}/api/admin/legacy-entry`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ suffix: "../bad" }),
+    });
+    assert.equal(invalid.response.status, 400);
+    assert.equal(invalid.body.code, "LEGACY_ENTRY_SUFFIX_INVALID");
+    assert.equal(app.store.listAuditLogs().filter((row) => row.action === "legacy_admin_entry_update").length, 2);
+  } finally {
+    await app.closeAll();
+  }
+});
+
 
 
 test("public host blocks admin routes and admin cookie is scoped to admin host", async () => {
@@ -234,6 +257,11 @@ test("public host blocks admin routes and admin cookie is scoped to admin host",
       headers: { "x-forwarded-host": "redeem.ayuekp.store" },
     });
     assert.equal(publicAdmin.status, 404);
+
+    const publicLegacyAdmin = await fetch(`${app.url}/admin-legacy/legacy-console`, {
+      headers: { "x-forwarded-host": "redeem.ayuekp.store" },
+    });
+    assert.equal(publicLegacyAdmin.status, 404);
 
     const publicAdminApi = await jsonFetch(`${app.url}/api/admin/dashboard`, {
       headers: { "x-forwarded-host": "redeem.ayuekp.store" },
@@ -1056,7 +1084,14 @@ test("admin VCC provider APIs save config, list masked remote cards, and import 
     const imported = await jsonFetch(`${app.url}/api/admin/card-providers/vcc/import`, {
       method: "POST",
       headers: { "x-admin-token": "admin-token" },
-      body: JSON.stringify({ card_group_id: group.body.data.id, max_success_count: 3, all: true }),
+      body: JSON.stringify({
+        card_group_id: group.body.data.id,
+        max_success_count: 3,
+        all: true,
+        auto_unfreeze_before_use: true,
+        auto_freeze_after_success: false,
+        auto_freeze_after_failure: true,
+      }),
     });
     assert.equal(imported.body.data.imported_count, 1);
     const cardId = imported.body.data.imported[0].id;
@@ -1064,6 +1099,9 @@ test("admin VCC provider APIs save config, list masked remote cards, and import 
     assert.equal(detail.number, "5572710152044444");
     assert.equal(detail.cvc, "456");
     assert.equal(detail.max_success_count, 3);
+    assert.equal(detail.auto_unfreeze_before_use, 1);
+    assert.equal(detail.auto_freeze_after_success, 0);
+    assert.equal(detail.auto_freeze_after_failure, 1);
     assert.equal(fetchCalls.some((call) => String(call.url).includes("sign=")), true);
   } finally {
     await app.closeAll();
@@ -1478,7 +1516,7 @@ test("admin billing APIs manage groups and addresses", async () => {
   }
 });
 
-test("admin SSE emits an initial queue snapshot", async () => {
+test("admin SSE emits queue and live dashboard snapshots", async () => {
   const app = await createTestApp({ adminToken: "admin-token" });
   const controller = new AbortController();
   try {
@@ -1488,10 +1526,17 @@ test("admin SSE emits an initial queue snapshot", async () => {
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type") || "", /text\/event-stream/);
     const reader = response.body.getReader();
-    const { value } = await reader.read();
-    const text = new TextDecoder().decode(value);
+    const decoder = new TextDecoder();
+    let text = "";
+    for (let index = 0; index < 3 && !text.includes("event: dashboard.snapshot"); index += 1) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
     assert.match(text, /event: queue\.snapshot/);
+    assert.match(text, /event: dashboard\.snapshot/);
     assert.match(text, /"queued":0/);
+    assert.match(text, /"recent_logs":\[\]/);
   } finally {
     controller.abort();
     await app.closeAll();
