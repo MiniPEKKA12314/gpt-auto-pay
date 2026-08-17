@@ -718,6 +718,16 @@ export async function prepareKimooxPerOrderCard(context = {}) {
     message: `Kimoox 按订单开卡开始: BIN=${cardBinId} 金额=${amount} USD requestNo=${requestNo}`,
     meta: { requestNo, cardType, cardBinId, target_balance_usd: amount },
   });
+  if (context.retryRuntime && typeof context.retryRuntime === "object") {
+    context.retryRuntime.kimooxRequestNo = requestNo;
+    context.retryRuntime.kimooxOpenSubmitted = true;
+  }
+  if (context.attemptId && typeof store.updateOrderAttemptProviderOperation === "function") {
+    store.updateOrderAttemptProviderOperation(context.attemptId, {
+      provider_open_submitted: 1,
+      provider_request_no: requestNo,
+    });
+  }
   const applyResult = await provider.openCard(openPayload);
   if (context.retryRuntime && typeof context.retryRuntime === "object") {
     const applyIds = extractApplyIds(applyResult);
@@ -725,6 +735,14 @@ export async function prepareKimooxPerOrderCard(context = {}) {
     context.retryRuntime.kimooxApplyTaskId = applyIds.taskId;
     context.retryRuntime.kimooxApplyBatchNo = applyIds.batchNo;
     context.retryRuntime.kimooxOpenSubmitted = true;
+    if (context.attemptId && typeof store.updateOrderAttemptProviderOperation === "function") {
+      store.updateOrderAttemptProviderOperation(context.attemptId, {
+        provider_open_submitted: 1,
+        provider_request_no: requestNo,
+        provider_task_id: applyIds.taskId,
+        provider_batch_no: applyIds.batchNo,
+      });
+    }
   }
   emit({ level: "info", stage: "kimoox_open_card", message: "Kimoox 开卡申请已提交", meta: { requestNo, result: applyResult } });
   const applied = await waitForKimooxAppliedCard(provider, applyResult, plan, emit, {
@@ -758,6 +776,13 @@ export async function prepareKimooxPerOrderCard(context = {}) {
     context.retryRuntime.kimooxPerOrderCardId = cardId;
     context.retryRuntime.kimooxProviderCardId = remote.provider_card_id;
     context.retryRuntime.kimooxRequestNo = requestNo;
+  }
+  if (context.attemptId && typeof store.updateOrderAttemptProviderOperation === "function") {
+    store.updateOrderAttemptProviderOperation(context.attemptId, {
+      provider_open_submitted: 1,
+      provider_request_no: requestNo,
+      provider_card_id: remote.provider_card_id,
+    });
   }
   emit({
     level: "success",

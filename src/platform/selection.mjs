@@ -37,6 +37,7 @@ export function selectCard(cards = [], planCardGroups = [], options = {}) {
       .filter((card) => !excludedCardIds.has(Number(card.id)))
       .filter((card) => card.status === CardStatus.ENABLED)
       .filter((card) => !isDeleted(card))
+      .filter((card) => Number(card.lease_order_id || 0) === 0)
       .filter((card) => numberOrDefault(card.success_count, 0) < numberOrDefault(card.max_success_count, 1))
       .sort(sortByPriorityThenRotation);
     if (eligible.length > 0) return eligible[0];
@@ -44,13 +45,16 @@ export function selectCard(cards = [], planCardGroups = [], options = {}) {
   return null;
 }
 
-export function selectBillingAddress(addresses = [], billingGroupId) {
+export function selectBillingAddress(addresses = [], billingGroupId, options = {}) {
   const groupId = Number(billingGroupId);
+  const excludedAddressIds = new Set([...(options.excludeAddressIds ?? options.exclude_address_ids ?? [])].map(Number));
   if (!groupId) return null;
   const eligible = addresses
     .filter((address) => Number(address.billing_group_id) === groupId)
     .filter((address) => address.status === BillingAddressStatus.ENABLED)
     .filter((address) => !isDeleted(address))
+    .filter((address) => Number(address.lease_order_id || 0) === 0)
+    .filter((address) => !excludedAddressIds.has(Number(address.id)))
     .sort(sortByPriorityThenRotation);
   return eligible[0] ?? null;
 }

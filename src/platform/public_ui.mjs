@@ -361,7 +361,6 @@ export function renderPublicUi(options = {}) {
         const current = loadDraft();
         const data = {
           code: $("codeInput") ? $("codeInput").value : current.code || "",
-          credential: $("credentialInput") ? $("credentialInput").value : current.credential || "",
           orderId: $("orderInput") ? $("orderInput").value : current.orderId || "",
           updatedAt: Date.now(),
           ...extra
@@ -372,7 +371,12 @@ export function renderPublicUi(options = {}) {
 
     function loadDraft() {
       try {
-        return JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}") || {};
+        const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}") || {};
+        if (draft && typeof draft === "object" && Object.hasOwn(draft, "credential")) {
+          delete draft.credential;
+          localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+        }
+        return draft;
       } catch {
         return {};
       }
@@ -744,6 +748,7 @@ export function renderPublicUi(options = {}) {
         const message = isRateLimitError(error) ? "提交过于频繁，请稍后再试。" : ((error.data && error.data.message) || error.message);
         renderStatus({ status: "created", message: message, transient: true });
       } finally {
+        if (credentialAccepted) $("credentialInput").value = "";
         $("submitBtn").disabled = !credentialAccepted;
       }
     }
@@ -823,13 +828,11 @@ export function renderPublicUi(options = {}) {
     });
 
     $("codeInput").addEventListener("input", function() { saveDraft(); });
-    $("credentialInput").addEventListener("input", function() { saveDraft(); });
     $("orderInput").addEventListener("input", function() { saveDraft(); });
 
     const draft = loadDraft();
     const lastOrder = localStorage.getItem(LAST_ORDER_KEY) || draft.orderId || "";
     if (draft.code) $("codeInput").value = draft.code;
-    if (draft.credential) $("credentialInput").value = draft.credential;
     if (lastOrder) {
       $("orderInput").value = lastOrder;
       queryOrder({ autoPoll: true });

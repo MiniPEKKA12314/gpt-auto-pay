@@ -1,5 +1,5 @@
 import { OrderStatus } from "./constants.mjs";
-import { cleanupKimooxPerOrderCard, planCardSource } from "./card_lifecycle.mjs";
+import { cleanupKimooxPerOrderCard, createCardLifecycleProvider, planCardSource } from "./card_lifecycle.mjs";
 import { decideNextCheckoutRetry, decideNextRetry, isCheckoutPhaseResult, normalizeRetryPolicy } from "./retry_policy.mjs";
 import { selectBillingAddress, selectCard } from "./selection.mjs";
 
@@ -95,6 +95,12 @@ function resultCardId(result = {}) {
   return Number(result?.card?.id ?? result?.kimoox_per_order_card?.local_card_id ?? 0);
 }
 
+function releaseOrderLeases(store, orderId, now) {
+  if (typeof store.releaseOrderResourceLeases === "function") {
+    store.releaseOrderResourceLeases(orderId, now());
+  }
+}
+
 function clearKimooxPerOrderRetryRuntime(retryRuntime = {}) {
   if (!retryRuntime || typeof retryRuntime !== "object") return;
   delete retryRuntime.kimooxPerOrderCardId;
@@ -118,6 +124,45 @@ async function cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime = {},
       ? (retryRuntime.vccPerOrderCardId ?? retryRuntime.vcc_per_order_card_id ?? 0)
       : (retryRuntime.kimooxPerOrderCardId ?? retryRuntime.kimoox_per_order_card_id ?? 0)
   );
+  if (!cardId && source === "kimoox" && retryRuntime.kimooxOpenSubmitted) {
+    const requestNo = String(retryRuntime.kimooxRequestNo ?? retryRuntime.kimoox_request_no ?? "").trim();
+    if (!requestNo) return { ok: false, pending: true, errors: ["Kimoox 开卡请求已提交但缺少 requestNo，无法定位远端卡"] };
+    try {
+      const provider = createCardLifecycleProvider(store, options)("kimoox");
+      const rows = await provider.listCards({ remark: requestNo, pageNum: 1, pageSize: 20 });
+      const remote = Array.isArray(rows) ? rows.find((row) => String(row.provider_card_id || "").trim()) : null;
+      if (!remote) {
+        const pending = { ok: false, pending: true, request_no: requestNo, errors: ["Kimoox 开卡请求已提交，但当前尚未查询到对应远端卡；已保留请求信息等待后续核对"] };
+        store.addRunLog({ order_id: order.id, attempt_id: attemptId, level: "error", stage: "kimoox_cleanup", message: pending.errors[0], meta: pending }, now());
+        return pending;
+      }
+      const remoteCard = {
+        id: 0,
+        provider: "kimoox",
+        provider_card_id: remote.provider_card_id,
+        masked_number: remote.masked_number || remote.cardNoMask || "Kimoox remote card",
+        status: "enabled",
+      };
+      const cleanup = await cleanupKimooxPerOrderCard({
+        store,
+        order,
+        plan,
+        card: remoteCard,
+        emit: createEmit(store, order.id, attemptId, now),
+        now,
+        fetchImpl: options.fetchImpl,
+        cardProviderFactory: options.cardProviderFactory,
+        retryRuntime,
+        directResult,
+        success: directResult?.ok === true || directResult?.status === "success",
+      });
+      return { ...cleanup, orphan_recovered: true, provider_card_id: remote.provider_card_id, request_no: requestNo };
+    } catch (error) {
+      const failed = { ok: false, pending: true, request_no: requestNo, errors: [error.message || String(error)] };
+      store.addRunLog({ order_id: order.id, attempt_id: attemptId, level: "error", stage: "kimoox_cleanup", message: `Kimoox 孤儿卡清理失败: ${failed.errors[0]}`, meta: failed }, now());
+      return failed;
+    }
+  }
   if (!cardId) return null;
   let card;
   try {
@@ -161,6 +206,26 @@ function mergeCleanupIntoResult(result = {}, cleanup = null) {
       cleanup,
     },
   };
+}
+
+export async function reconcileKimooxOrphanOperation(store, attempt, options = {}) {
+  if (!store || !attempt?.order_id || !attempt.provider_request_no) return { skipped: true, reason: "missing_operation" };
+  const order = store.getOrderById(attempt.order_id);
+  const plan = store.getPlanConfig(order.plan_type, { includeCardGroups: true });
+  const retryRuntime = {
+    kimooxOpenSubmitted: true,
+    kimooxRequestNo: attempt.provider_request_no,
+  };
+  return cleanupPerOrderRuntimeCard(
+    store,
+    order,
+    plan,
+    retryRuntime,
+    options,
+    attempt.id,
+    options.now ?? (() => Date.now() / 1000),
+    null,
+  );
 }
 
 async function safeCleanupAfterSuccess(store, order, plan, retryRuntime, options, attemptId, now, runnerResult) {
@@ -222,7 +287,10 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
     throw new Error(`order must be queued or running, got ${order.status}`);
   }
 
+  try {
   const { plan, card, billingAddress } = resolveOrderResources(store, order);
+  const cardLeased = !card?.id || store.acquireCardLease(card.id, order.id, now());
+  const billingLeased = !billingAddress?.id || store.acquireBillingAddressLease(billingAddress.id, order.id, now());
   if (card?.id) store.touchCardLastUsed(card.id, now());
   if (billingAddress?.id) store.touchBillingAddressLastUsed(billingAddress.id, now());
   const retryRuntime = {};
@@ -247,7 +315,8 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
     }, now());
   };
 
-  if (!card) {
+  if (!card || !cardLeased) {
+    releaseOrderLeases(store, order.id, now);
     return {
       ok: false,
       result: resultFailed("没有可用卡"),
@@ -255,7 +324,8 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
     };
   }
 
-  if (!billingAddress) {
+  if (!billingAddress || !billingLeased) {
+    releaseOrderLeases(store, order.id, now);
     return {
       ok: false,
       result: resultFailed("没有可用账单地址"),
@@ -302,6 +372,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
     runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
     const succeededCardId = resultCardId(runnerResult) || card.id;
     const updatedCard = incrementCardSuccessSafely(store, order, attemptId, succeededCardId, card, now);
+    releaseOrderLeases(store, order.id, now);
     return {
       ok: true,
       result: runnerResult,
@@ -317,6 +388,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
   runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
   const message = runnerResult?.message || runnerResult?.error || "runner failed";
   const failed = await failOrder(store, order.id, attemptId, message, "runner", now(), plan);
+  releaseOrderLeases(store, order.id, now);
   return {
     ok: false,
     result: runnerResult,
@@ -326,6 +398,9 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
     billingAddress,
     attempt: store.updateOrderAttempt(attemptId, { status: "failed", stage: "runner", error_message: message }, now()),
   };
+  } finally {
+    releaseOrderLeases(store, order.id, now);
+  }
 }
 
 function createEmit(store, orderId, attemptId, now) {
@@ -387,6 +462,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     throw new Error(`order must be queued or running, got ${order.status}`);
   }
 
+  try {
   const manualOptions = typeof store.getManualOrderOptions === "function" ? store.getManualOrderOptions(order.id) : null;
   const plan = manualEffectivePlan(store.getPlanConfig(order.plan_type, { includeCardGroups: true }), manualOptions);
   const policy = normalizeRetryPolicy(plan);
@@ -454,6 +530,11 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
         };
       }
       if (card.id) {
+        if (!store.acquireCardLease(card.id, order.id, now())) {
+          attemptedCardIds.add(Number(card.id));
+          card = null;
+          continue;
+        }
         attemptedCardIds.add(Number(card.id));
         store.touchCardLastUsed(card.id, now());
       }
@@ -599,6 +680,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     }
 
     if (decision.action === "switch_card") {
+      if (card?.id) store.releaseCardLease(card.id, order.id, now());
       let previousCardCleanup = null;
       if (planCardSource(plan) === "kimoox") {
         try {
@@ -688,4 +770,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     billingAddress,
     attempts: previousResults,
   };
+  } finally {
+    releaseOrderLeases(store, order.id, now);
+  }
 }

@@ -1,5 +1,5 @@
 import { nowSeconds } from "./constants.mjs";
-import { runPlatformOrderWithRetry } from "./runner_adapter.mjs";
+import { reconcileKimooxOrphanOperation, runPlatformOrderWithRetry } from "./runner_adapter.mjs";
 
 function defaultNow() {
   return nowSeconds();
@@ -31,6 +31,32 @@ function pauseQueueAfterFailureIfEnabled(store, result = {}, now = defaultNow())
     meta: { order_no: failed.order_no, result: failed.result, failure_count: failureCount.failure_count, threshold },
   }, now);
   return after;
+}
+
+async function reconcilePendingProviderOperations(store, options = {}) {
+  if (typeof store.listPendingProviderOperations !== "function") return [];
+  const results = [];
+  for (const attempt of store.listPendingProviderOperations("kimoox")) {
+    try {
+      const result = await reconcileKimooxOrphanOperation(store, attempt, options);
+      results.push({ attempt_id: attempt.id, order_no: attempt.order_no, result });
+      store.addRunLog({
+        order_id: attempt.order_id,
+        attempt_id: attempt.id,
+        level: result?.ok === false ? "error" : "info",
+        stage: "kimoox_recovery",
+        message: result?.ok === false
+          ? `Kimoox 重启恢复未完成: ${(result.errors || []).join("; ")}`
+          : "Kimoox 重启恢复检查已完成",
+        meta: result,
+      }, options.now ? options.now() : defaultNow());
+    } catch (error) {
+      const result = { ok: false, errors: [error.message || String(error)] };
+      results.push({ attempt_id: attempt.id, order_no: attempt.order_no, result });
+      store.addRunLog({ order_id: attempt.order_id, attempt_id: attempt.id, level: "error", stage: "kimoox_recovery", message: `Kimoox 重启恢复失败: ${result.errors[0]}`, meta: result }, options.now ? options.now() : defaultNow());
+    }
+  }
+  return results;
 }
 
 export async function runQueueOnce(store, adapterFactory, options = {}) {
@@ -87,6 +113,7 @@ export async function runQueueOnce(store, adapterFactory, options = {}) {
           failedOrder = store.getOrderById(order.id);
         }
       }
+      if (typeof store.releaseOrderResourceLeases === "function") store.releaseOrderResourceLeases(order.id, now());
       return {
         order_id: order.id,
         order_no: order.order_no,
@@ -137,6 +164,13 @@ export class PlatformQueueWorker {
       const recovered = recoverWorkerRuntime(this.store, "worker_start_recovery", this.now());
       this.logger({ type: "recovery", ...recovered });
     }
+    void reconcilePendingProviderOperations(this.store, {
+      now: this.now,
+      fetchImpl: this.fetchImpl,
+      cardProviderFactory: this.cardProviderFactory,
+    }).then((operations) => {
+      if (operations.length) this.logger({ type: "kimoox_recovery", operations });
+    }).catch((error) => this.logger({ type: "kimoox_recovery_error", error: error.message || String(error) }));
     void this.tick();
     this.timer = setInterval(() => {
       void this.tick();

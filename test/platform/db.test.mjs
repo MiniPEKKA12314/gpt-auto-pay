@@ -503,3 +503,34 @@ test("touching selected cards and billing addresses completes equal-priority rot
   store.touchBillingAddressLastUsed(firstAddressId, 170);
   assert.equal(store.listBillingAddresses({ billing_group_id: billingGroupId })[0].id, secondAddressId);
 }));
+
+test("card and billing leases are exclusive and recoverable", () => withStore((store) => {
+  const cardGroupId = store.createCardGroup({ name: "lease cards" }, 180);
+  const cardId = store.createCard({
+    card_group_id: cardGroupId,
+    number: "4242424242424242",
+    exp_month: "12",
+    exp_year: "2030",
+    cvc: "123",
+  }, 181);
+  const billingGroupId = store.createBillingGroup({ name: "lease billing" }, 182);
+  const addressId = store.createBillingAddress({
+    billing_group_id: billingGroupId,
+    name: "Lease User",
+    country: "US",
+    city: "Austin",
+    line1: "1 Lease Ave",
+    postal_code: "78701",
+  }, 183);
+
+  assert.equal(store.acquireCardLease(cardId, 1001, 184), true);
+  assert.equal(store.acquireCardLease(cardId, 1002, 185), false);
+  assert.equal(store.acquireBillingAddressLease(addressId, 1001, 184), true);
+  assert.equal(store.acquireBillingAddressLease(addressId, 1002, 185), false);
+  assert.equal(store.listCards({ card_group_id: cardGroupId })[0].lease_order_id, 1001);
+  assert.equal(store.listBillingAddresses({ billing_group_id: billingGroupId })[0].lease_order_id, 1001);
+
+  store.releaseOrderResourceLeases(1001, 186);
+  assert.equal(store.acquireCardLease(cardId, 1002, 187), true);
+  assert.equal(store.acquireBillingAddressLease(addressId, 1002, 187), true);
+}));

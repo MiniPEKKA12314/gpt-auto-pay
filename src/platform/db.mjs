@@ -69,6 +69,17 @@ function ensurePlatformMigrations(db) {
   ensureColumn(db, "cards", "auto_unfreeze_before_use", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "cards", "auto_freeze_after_success", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "cards", "auto_freeze_after_failure", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "cards", "lease_order_id", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "cards", "lease_at", "REAL NOT NULL DEFAULT 0");
+  ensureColumn(db, "billing_addresses", "lease_order_id", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "billing_addresses", "lease_at", "REAL NOT NULL DEFAULT 0");
+  ensureColumn(db, "order_attempts", "provider_open_submitted", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "order_attempts", "provider_request_no", "TEXT DEFAULT ''");
+  ensureColumn(db, "order_attempts", "provider_task_id", "TEXT DEFAULT ''");
+  ensureColumn(db, "order_attempts", "provider_batch_no", "TEXT DEFAULT ''");
+  ensureColumn(db, "order_attempts", "provider_card_id", "TEXT DEFAULT ''");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_cards_lease ON cards(lease_order_id, lease_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_billing_addresses_lease ON billing_addresses(lease_order_id, lease_at)");
 }
 
 function ensureDefaultAdmin(db, now = nowSeconds()) {
@@ -675,6 +686,25 @@ export class PlatformStore {
     }));
   }
 
+  acquireCardLease(cardId, orderId, now = nowSeconds()) {
+    const result = this.db.prepare(`
+      UPDATE cards
+         SET lease_order_id = ?, lease_at = ?, updated_at = ?
+       WHERE id = ? AND deleted_at = 0
+         AND (lease_order_id = 0 OR lease_order_id = ?)
+    `).run(Number(orderId), now, now, Number(cardId), Number(orderId));
+    return Number(result.changes) === 1;
+  }
+
+  releaseCardLease(cardId, orderId, now = nowSeconds()) {
+    const result = this.db.prepare(`
+      UPDATE cards
+         SET lease_order_id = 0, lease_at = 0, updated_at = ?
+       WHERE id = ? AND lease_order_id = ?
+    `).run(now, Number(cardId), Number(orderId));
+    return Number(result.changes) === 1;
+  }
+
   updateCard(cardId, input = {}, now = nowSeconds()) {
     const current = this.getCardById(cardId, { includeSecret: true });
     const nextGroupId = input.card_group_id ?? input.cardGroupId ?? current.card_group_id;
@@ -892,6 +922,37 @@ export class PlatformStore {
       WHERE ${where.join(" AND ")}
       ORDER BY priority ASC, last_used_at ASC, id ASC
     `).all(...params);
+  }
+
+  acquireBillingAddressLease(addressId, orderId, now = nowSeconds()) {
+    const result = this.db.prepare(`
+      UPDATE billing_addresses
+         SET lease_order_id = ?, lease_at = ?, updated_at = ?
+       WHERE id = ? AND deleted_at = 0
+         AND (lease_order_id = 0 OR lease_order_id = ?)
+    `).run(Number(orderId), now, now, Number(addressId), Number(orderId));
+    return Number(result.changes) === 1;
+  }
+
+  releaseBillingAddressLease(addressId, orderId, now = nowSeconds()) {
+    const result = this.db.prepare(`
+      UPDATE billing_addresses
+         SET lease_order_id = 0, lease_at = 0, updated_at = ?
+       WHERE id = ? AND lease_order_id = ?
+    `).run(now, Number(addressId), Number(orderId));
+    return Number(result.changes) === 1;
+  }
+
+  releaseOrderResourceLeases(orderId, now = nowSeconds()) {
+    const cardResult = this.db.prepare(`
+      UPDATE cards SET lease_order_id = 0, lease_at = 0, updated_at = ?
+       WHERE lease_order_id = ?
+    `).run(now, Number(orderId));
+    const addressResult = this.db.prepare(`
+      UPDATE billing_addresses SET lease_order_id = 0, lease_at = 0, updated_at = ?
+       WHERE lease_order_id = ?
+    `).run(now, Number(orderId));
+    return { cards: Number(cardResult.changes), billing_addresses: Number(addressResult.changes) };
   }
 
   getBillingAddressById(addressId) {
@@ -1472,6 +1533,9 @@ export class PlatformStore {
   softDeleteOrder(orderId, adminId = 1, reason = "", now = nowSeconds()) {
     const order = this.getOrderById(orderId);
     if (Number(order.deleted_at || 0) > 0) return order;
+    if ([OrderStatus.QUEUED, OrderStatus.RUNNING].includes(order.status)) {
+      throw new PlatformStoreError("ORDER_ACTIVE_CANNOT_DELETE", "运行中的订单不能删除，请先停止或完成订单");
+    }
     this.db.prepare(`
       UPDATE orders
          SET deleted_at = ?, deleted_by = ?, delete_reason = ?, updated_at = ?
@@ -1621,6 +1685,24 @@ export class PlatformStore {
     return getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
   }
 
+  updateOrderAttemptProviderOperation(attemptId, input = {}) {
+    const current = getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
+    this.db.prepare(`
+      UPDATE order_attempts
+         SET provider_open_submitted = ?, provider_request_no = ?, provider_task_id = ?,
+             provider_batch_no = ?, provider_card_id = ?
+       WHERE id = ?
+    `).run(
+      boolInt(input.provider_open_submitted ?? input.providerOpenSubmitted ?? current.provider_open_submitted),
+      String(input.provider_request_no ?? input.providerRequestNo ?? current.provider_request_no ?? ""),
+      String(input.provider_task_id ?? input.providerTaskId ?? current.provider_task_id ?? ""),
+      String(input.provider_batch_no ?? input.providerBatchNo ?? current.provider_batch_no ?? ""),
+      String(input.provider_card_id ?? input.providerCardId ?? current.provider_card_id ?? ""),
+      Number(attemptId),
+    );
+    return getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
+  }
+
   setOrderAttemptProxies(attemptId, input = {}) {
     const current = getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
     this.db.prepare(`
@@ -1645,6 +1727,21 @@ export class PlatformStore {
       WHERE order_id = ?
       ORDER BY attempt_no ASC, id ASC
     `).all(Number(orderId));
+  }
+
+  listPendingProviderOperations(provider = "kimoox") {
+    if (String(provider).toLowerCase() !== "kimoox") return [];
+    return this.db.prepare(`
+      SELECT oa.*, o.order_no, o.plan_type, o.status AS order_status
+      FROM order_attempts oa
+      JOIN orders o ON o.id = oa.order_id
+      WHERE oa.provider_open_submitted = 1
+        AND oa.provider_card_id = ''
+        AND oa.provider_request_no <> ''
+        AND o.status IN (?, ?)
+        AND o.deleted_at = 0
+      ORDER BY oa.id ASC
+    `).all(OrderStatus.FAILED, OrderStatus.INTERRUPTED_REVIEW);
   }
 
   nextAttemptNo(orderId) {
@@ -2330,6 +2427,7 @@ export class PlatformStore {
              SET status = ?, unavailable_at = ?, unavailable_reason = ?
            WHERE id = ? AND status = ?
         `).run(RedeemStatus.UNAVAILABLE, now, reason, order.redeem_code_id, RedeemStatus.LOCKED);
+        this.releaseOrderResourceLeases(order.id, now);
       }
       return runningOrders.length;
     });

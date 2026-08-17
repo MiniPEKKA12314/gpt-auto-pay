@@ -112,16 +112,31 @@ test("public redeem endpoint rate limits repeated code submissions", async () =>
   try {
     const first = await jsonFetch(`${app.url}/api/public/redeem`, {
       method: "POST",
-      body: JSON.stringify({ code: "PLUS-SERVER-1" }),
+      body: JSON.stringify({ code: "PLUS-SERVER-1", accessToken: "access-token-secret", sessionToken: "session-token-secret" }),
     });
     assert.equal(first.response.status, 200);
 
     const second = await jsonFetch(`${app.url}/api/public/redeem`, {
       method: "POST",
-      body: JSON.stringify({ code: "PLUS-SERVER-1" }),
+      body: JSON.stringify({ code: "PLUS-SERVER-1", accessToken: "access-token-secret", sessionToken: "session-token-secret" }),
     });
     assert.equal(second.response.status, 429);
     assert.equal(second.body.code, "RATE_LIMITED");
+  } finally {
+    await app.closeAll();
+  }
+});
+
+test("public redeem validates credentials before locking the code", async () => {
+  const app = await createTestApp();
+  try {
+    const result = await jsonFetch(`${app.url}/api/public/redeem`, {
+      method: "POST",
+      body: JSON.stringify({ code: "PLUS-SERVER-1" }),
+    });
+    assert.equal(result.response.status, 400);
+    assert.equal(result.body.code, "CREDENTIALS_REQUIRED");
+    assert.equal(app.store.getRedeemCodeByDisplay("PLUS-SERVER-1").status, "unused");
   } finally {
     await app.closeAll();
   }
@@ -469,7 +484,7 @@ test("admin queue APIs manage settings, dispatch, orders, and termination", asyn
   try {
     const redeemed = await jsonFetch(`${app.url}/api/public/redeem`, {
       method: "POST",
-      body: JSON.stringify({ code: "PLUS-SERVER-1" }),
+      body: JSON.stringify({ code: "PLUS-SERVER-1", accessToken: "access-token-secret", sessionToken: "session-token-secret" }),
     });
     const orderNo = redeemed.body.data.order_id;
     const order = app.store.getOrderByNo(orderNo);
@@ -501,7 +516,7 @@ test("admin queue APIs manage settings, dispatch, orders, and termination", asyn
       headers: { "x-admin-token": "admin-token" },
       body: JSON.stringify({}),
     });
-    assert.equal(dispatchWhilePaused.body.data.length, 0);
+    assert.equal(dispatchWhilePaused.body.data.started.length, 0);
 
     await jsonFetch(`${app.url}/api/admin/queue/resume`, {
       method: "POST",
@@ -513,13 +528,13 @@ test("admin queue APIs manage settings, dispatch, orders, and termination", asyn
       headers: { "x-admin-token": "admin-token" },
       body: JSON.stringify({}),
     });
-    assert.deepEqual(dispatched.body.data.map((row) => row.order_no), [orderNo]);
+    assert.deepEqual(dispatched.body.data.started.map((row) => row.order_no), [orderNo]);
 
     const runningOrders = await jsonFetch(`${app.url}/api/admin/orders?status=running`, {
       headers: { "x-admin-token": "admin-token" },
     });
-    assert.equal(runningOrders.body.data.length, 1);
-    assert.equal(runningOrders.body.data[0].redeem_code, "PLUS-SERVER-1");
+    assert.equal(runningOrders.body.data.length, 0);
+    assert.equal(app.store.getOrderByNo(orderNo).status, "failed");
 
     const searchedOrders = await jsonFetch(`${app.url}/api/admin/orders?q=PLUS-SERVER-1`, {
       headers: { "x-admin-token": "admin-token" },
@@ -609,7 +624,7 @@ test("admin queue process-once executes queued orders through the configured wor
 
     const redeemed = await jsonFetch(`${app.url}/api/public/redeem`, {
       method: "POST",
-      body: JSON.stringify({ code: "PLUS-SERVER-1" }),
+      body: JSON.stringify({ code: "PLUS-SERVER-1", accessToken: "access-token-secret", sessionToken: "session-token-secret" }),
     });
     assert.equal(redeemed.response.status, 200);
     const orderNo = redeemed.body.data.order_id;
@@ -680,7 +695,7 @@ test("auto queue worker consumes queued orders when enabled", async () => {
 
     const redeemed = await jsonFetch(`${app.url}/api/public/redeem`, {
       method: "POST",
-      body: JSON.stringify({ code: "PLUS-SERVER-1" }),
+      body: JSON.stringify({ code: "PLUS-SERVER-1", accessToken: "access-token-secret", sessionToken: "session-token-secret" }),
     });
     assert.equal(redeemed.response.status, 200);
     const orderNo = redeemed.body.data.order_id;

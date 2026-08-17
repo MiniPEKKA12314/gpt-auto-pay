@@ -9,24 +9,28 @@ function createWorkerStore(quantity = 1, options = {}) {
   const db = openPlatformDb(":memory:");
   const store = new PlatformStore(db, { secretKey: "local-development-secret" });
   const cardGroupId = store.createCardGroup({ name: `worker cards ${quantity}` }, 10);
-  store.createCard({
-    card_group_id: cardGroupId,
-    number: "4242424242424242",
-    exp_month: "12",
-    exp_year: "2030",
-    cvc: "123",
-    max_success_count: 10,
-  }, 11);
+  for (let index = 0; index < quantity; index += 1) {
+    store.createCard({
+      card_group_id: cardGroupId,
+      number: `400000000000${String(1000 + index).padStart(4, "0")}`,
+      exp_month: "12",
+      exp_year: "2030",
+      cvc: "123",
+      max_success_count: 10,
+    }, 11 + index);
+  }
   const billingGroupId = store.createBillingGroup({ name: `worker billing ${quantity}` }, 12);
-  store.createBillingAddress({
-    billing_group_id: billingGroupId,
-    name: "Test User",
-    country: "US",
-    state: "CA",
-    city: "Los Angeles",
-    line1: "1 Worker Ave",
-    postal_code: "90001",
-  }, 13);
+  for (let index = 0; index < quantity; index += 1) {
+    store.createBillingAddress({
+      billing_group_id: billingGroupId,
+      name: `Test User ${index}`,
+      country: "US",
+      state: "CA",
+      city: "Los Angeles",
+      line1: `${index + 1} Worker Ave`,
+      postal_code: "90001",
+    }, 13 + index);
+  }
   store.upsertPlanConfig({
     plan_type: "plus",
     billing_group_id: billingGroupId,

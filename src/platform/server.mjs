@@ -56,6 +56,22 @@ async function readJson(req) {
   }
 }
 
+function requirePublicRuntimeCredentials(body = {}) {
+  const accessToken = String(body.accessToken ?? body.access_token ?? "").trim();
+  const sessionToken = String(body.sessionToken ?? body.session_token ?? "").trim();
+  if (!accessToken || !sessionToken) {
+    throw new PlatformStoreError("CREDENTIALS_REQUIRED", "请粘贴完整的 ChatGPT session JSON，其中必须包含 Access Token 和 Session Token");
+  }
+  if (accessToken.length > 16384 || sessionToken.length > 16384) {
+    throw new PlatformStoreError("CREDENTIALS_TOO_LARGE", "授权凭证长度异常，请重新复制完整的 session JSON");
+  }
+  return {
+    accessToken,
+    sessionToken,
+    sessionCookieName: String(body.sessionCookieName ?? body.session_cookie_name ?? "").trim(),
+  };
+}
+
 async function readRawBody(req, maxBytes = 1024 * 1024) {
   const chunks = [];
   let size = 0;
@@ -559,6 +575,7 @@ export function createPlatformRequestHandler(options = {}) {
       if (req.method === "POST" && url.pathname === "/api/public/redeem") {
         if (!rateLimit(res, limiter, `redeem:ip:${ip}`, 5, 60_000)) return;
         const body = await readJson(req);
+        const credentials = requirePublicRuntimeCredentials(body);
         const code = normalizeRedeemCode(body.code);
         if (!code) {
           sendError(res, 400, "CODE_REQUIRED", "请输入兑换码");
@@ -578,13 +595,7 @@ export function createPlatformRequestHandler(options = {}) {
           user_ip: ip,
           user_agent: req.headers["user-agent"] || "",
         });
-        if (body.accessToken || body.access_token || body.sessionToken || body.session_token || body.sessionCookieName || body.session_cookie_name) {
-          store.setOrderRuntimeSecrets(order.id, {
-            accessToken: body.accessToken ?? body.access_token,
-            sessionToken: body.sessionToken ?? body.session_token,
-            sessionCookieName: body.sessionCookieName ?? body.session_cookie_name,
-          });
-        }
+        store.setOrderRuntimeSecrets(order.id, credentials);
         sendJson(res, 200, { ok: true, data: publicOrderSummary(order, store.getPlanConfig(order.plan_type, { includeCardGroups: false })) });
         return;
       }
@@ -609,7 +620,9 @@ export function createPlatformRequestHandler(options = {}) {
       const orderMatch = url.pathname.match(/^\/api\/public\/orders\/([^/]+)$/);
       if (req.method === "GET" && orderMatch) {
         const isAutoPoll = url.searchParams.get("poll") === "1" || req.headers["x-auto-poll"] === "1";
-        if (!isAutoPoll && !rateLimit(res, limiter, `status:ip:${ip}`, 5, 60_000)) return;
+        const statusLimit = isAutoPoll ? 30 : 5;
+        const statusKey = isAutoPoll ? `status:auto:${ip}:${orderMatch[1]}` : `status:ip:${ip}`;
+        if (!rateLimit(res, limiter, statusKey, statusLimit, 60_000)) return;
         const order = store.getOrderByNo(decodeURIComponent(orderMatch[1]));
         if (!order) {
           sendError(res, 404, "ORDER_NOT_FOUND", "订单不存在");
@@ -759,14 +772,17 @@ export function createPlatformRequestHandler(options = {}) {
 
       if (req.method === "POST" && url.pathname === "/api/admin/queue/dispatch") {
         if (!requireAdmin(req, res, adminToken, url)) return;
-        const orders = store.dispatchQueuedOrders();
+        const result = await runQueueOnce(store, queueAdapterFactory, {
+          fetchImpl,
+          cardProviderFactory: options.cardProviderFactory,
+        });
         adminAudit(store, req, {
           action: "queue_dispatch",
           target_type: "queue",
           target_id: "global",
-          after: { order_ids: orders.map((order) => order.id) },
+          after: { order_ids: result.started.map((order) => order.id), results: result.results.map((row) => ({ order_id: row.order_id, ok: row.ok })) },
         });
-        sendJson(res, 200, { ok: true, data: orders });
+        sendJson(res, 200, { ok: true, data: result });
         return;
       }
 

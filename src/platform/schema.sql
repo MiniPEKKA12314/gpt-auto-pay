@@ -144,6 +144,8 @@ CREATE TABLE IF NOT EXISTS cards (
   status TEXT NOT NULL DEFAULT 'enabled',
   note TEXT DEFAULT '',
   last_used_at REAL DEFAULT 0,
+  lease_order_id INTEGER NOT NULL DEFAULT 0,
+  lease_at REAL NOT NULL DEFAULT 0,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
   deleted_at REAL DEFAULT 0,
@@ -154,6 +156,7 @@ CREATE TABLE IF NOT EXISTS cards (
 
 CREATE INDEX IF NOT EXISTS idx_cards_group_status ON cards(card_group_id, status);
 CREATE INDEX IF NOT EXISTS idx_cards_priority ON cards(priority, last_used_at);
+CREATE INDEX IF NOT EXISTS idx_cards_lease ON cards(lease_order_id, lease_at);
 
 CREATE TABLE IF NOT EXISTS billing_groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,6 +186,8 @@ CREATE TABLE IF NOT EXISTS billing_addresses (
   status TEXT NOT NULL DEFAULT 'enabled',
   note TEXT DEFAULT '',
   last_used_at REAL DEFAULT 0,
+  lease_order_id INTEGER NOT NULL DEFAULT 0,
+  lease_at REAL NOT NULL DEFAULT 0,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
   deleted_at REAL DEFAULT 0,
@@ -190,6 +195,8 @@ CREATE TABLE IF NOT EXISTS billing_addresses (
   delete_reason TEXT DEFAULT '',
   FOREIGN KEY(billing_group_id) REFERENCES billing_groups(id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_billing_addresses_lease ON billing_addresses(lease_order_id, lease_at);
 
 CREATE TABLE IF NOT EXISTS proxy_groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -278,6 +285,11 @@ CREATE TABLE IF NOT EXISTS order_attempts (
   stage TEXT DEFAULT '',
   error_code TEXT DEFAULT '',
   error_message TEXT DEFAULT '',
+  provider_open_submitted INTEGER NOT NULL DEFAULT 0,
+  provider_request_no TEXT DEFAULT '',
+  provider_task_id TEXT DEFAULT '',
+  provider_batch_no TEXT DEFAULT '',
+  provider_card_id TEXT DEFAULT '',
   started_at REAL DEFAULT 0,
   finished_at REAL DEFAULT 0,
   created_at REAL NOT NULL,
