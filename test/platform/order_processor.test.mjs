@@ -573,6 +573,54 @@ test("remote balance decrease fallback marks an unresolved payment as successful
   }
 });
 
+test("remote balance decrease fallback remains authoritative when direct-card execution throws", async () => {
+  const { store, cardId, orderId } = createProcessorStore();
+  try {
+    store.setCardProviderConfig("vcc", { user_serial: "user-throw", secret_key: "secret" }, 83);
+    store.updateCard(cardId, {
+      provider: "vcc",
+      provider_card_id: "remote-balance-throw-1",
+    }, 84);
+    store.upsertPlanConfig({
+      ...store.getPlanConfig("plus"),
+      vcc_target_balance_usd: "20.00",
+      remote_balance_success_fallback: true,
+    }, 85);
+
+    let cardBalanceCents = 2000;
+    const factory = createPlatformPaymentAdapterFactory({
+      checkoutAdapterFactory: () => ({
+        async execute() {
+          return { ok: true, status: "success", checkoutInput: "oaics_balance_throw", checkout_input: "oaics_balance_throw" };
+        },
+      }),
+      directCardAdapterFactory: () => ({
+        async execute() {
+          cardBalanceCents = 500;
+          throw new Error("browser disconnected after payment submit");
+        },
+      }),
+    });
+    const cardProviderFactory = () => ({
+      async listCards() {
+        return [{
+          provider_card_id: "remote-balance-throw-1",
+          card_balance: (cardBalanceCents / 100).toFixed(2),
+          masked_number: "4242 **** **** 4242",
+        }];
+      },
+    });
+
+    const result = await runPlatformOrderWithRetry(store, orderId, factory, { now: () => 510, cardProviderFactory });
+    assert.equal(result.ok, true);
+    assert.equal(result.order.status, "succeeded");
+    assert.equal(result.result.code, "DIRECT_CARD_SUCCEEDED_BY_BALANCE");
+    assert.equal(result.redeemCode.status, "used");
+  } finally {
+    store.close();
+  }
+});
+
 test("a post-payment remote-card freeze failure does not downgrade a confirmed payment", async () => {
   const { store, cardId, orderId } = createProcessorStore();
   try {

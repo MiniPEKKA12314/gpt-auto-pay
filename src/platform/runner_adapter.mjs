@@ -103,6 +103,9 @@ function clearKimooxPerOrderRetryRuntime(retryRuntime = {}) {
   delete retryRuntime.kimoox_provider_card_id;
   delete retryRuntime.kimooxRequestNo;
   delete retryRuntime.kimoox_request_no;
+  delete retryRuntime.kimooxApplyTaskId;
+  delete retryRuntime.kimooxApplyBatchNo;
+  delete retryRuntime.kimooxOpenSubmitted;
   delete retryRuntime.kimooxPerOrderCleanup;
 }
 
@@ -160,6 +163,40 @@ function mergeCleanupIntoResult(result = {}, cleanup = null) {
   };
 }
 
+async function safeCleanupAfterSuccess(store, order, plan, retryRuntime, options, attemptId, now, runnerResult) {
+  try {
+    return await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
+  } catch (error) {
+    const cleanup = { ok: false, errors: [error.message || String(error)] };
+    store.addRunLog({
+      order_id: order.id,
+      attempt_id: attemptId,
+      level: "error",
+      stage: "post_success_cleanup",
+      message: `Payment was confirmed, but remote-card cleanup failed: ${cleanup.errors[0]}`,
+      meta: cleanup,
+    }, now());
+    return cleanup;
+  }
+}
+
+function incrementCardSuccessSafely(store, order, attemptId, cardId, card, now) {
+  if (!cardId) return card;
+  try {
+    return store.incrementCardSuccessCount(cardId, now());
+  } catch (error) {
+    store.addRunLog({
+      order_id: order.id,
+      attempt_id: attemptId,
+      level: "error",
+      stage: "post_success_card_stats",
+      message: `Payment was confirmed, but card success statistics failed: ${error.message || error}`,
+      meta: { card_id: cardId },
+    }, now());
+    return card;
+  }
+}
+
 export function resolveOrderResources(store, order) {
   const manualOptions = typeof store.getManualOrderOptions === "function" ? store.getManualOrderOptions(order.id) : null;
   const plan = manualEffectivePlan(store.getPlanConfig(order.plan_type, { includeCardGroups: true }), manualOptions);
@@ -186,6 +223,8 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
   }
 
   const { plan, card, billingAddress } = resolveOrderResources(store, order);
+  if (card?.id) store.touchCardLastUsed(card.id, now());
+  if (billingAddress?.id) store.touchBillingAddressLastUsed(billingAddress.id, now());
   const retryRuntime = {};
   const attemptNo = store.nextAttemptNo(order.id);
   const attemptId = store.createOrderAttempt({
@@ -246,8 +285,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
   }
 
   if (isSuccessResult(runnerResult)) {
-    const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
-    runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
+    const result = store.markOrderSucceeded(order.id, now());
     store.updateOrderAttempt(attemptId, {
       status: "success",
       stage: "completed",
@@ -260,9 +298,10 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
       message: runnerResult.message ?? "订阅成功",
       meta: runnerResult,
     }, now());
-    const result = store.markOrderSucceeded(order.id, now());
-      const succeededCardId = resultCardId(runnerResult) || card.id;
-    const updatedCard = succeededCardId ? store.incrementCardSuccessCount(succeededCardId, now()) : card;
+    const cleanup = await safeCleanupAfterSuccess(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
+    runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
+    const succeededCardId = resultCardId(runnerResult) || card.id;
+    const updatedCard = incrementCardSuccessSafely(store, order, attemptId, succeededCardId, card, now);
     return {
       ok: true,
       result: runnerResult,
@@ -354,6 +393,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
   const billingAddress = manualOptions?.billing_address_id
     ? store.getBillingAddressById(manualOptions.billing_address_id)
     : selectBillingAddress(store.listBillingAddresses(), plan.billing_group_id);
+  if (billingAddress?.id) store.touchBillingAddressLastUsed(billingAddress.id, now());
   const previousResults = [];
   const retryRuntime = {};
   const attemptedCardIds = new Set();
@@ -413,7 +453,10 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
           attempts: previousResults,
         };
       }
-      if (card.id) attemptedCardIds.add(Number(card.id));
+      if (card.id) {
+        attemptedCardIds.add(Number(card.id));
+        store.touchCardLastUsed(card.id, now());
+      }
     }
 
     const secretCard = card.id ? store.getCardById(card.id, { includeSecret: true }) : card;
@@ -472,14 +515,13 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
       });
     } catch (error) {
       runnerResult = resultFailed(error.message || "runner exception", {
-        code: "RUNNER_EXCEPTION",
+        code: error.code || "RUNNER_EXCEPTION",
         error,
       });
     }
 
     if (isSuccessResult(runnerResult)) {
-      const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
-      runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
+      const result = store.markOrderSucceeded(order.id, now());
       store.updateOrderAttempt(attemptId, {
         status: "success",
         stage: "completed",
@@ -492,9 +534,10 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
         message: runnerResult.message ?? "订阅成功",
         meta: runnerResult,
       }, now());
-      const result = store.markOrderSucceeded(order.id, now());
+      const cleanup = await safeCleanupAfterSuccess(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
+      runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
       const succeededCardId = resultCardId(runnerResult) || card.id;
-      const updatedCard = succeededCardId ? store.incrementCardSuccessCount(succeededCardId, now()) : card;
+      const updatedCard = incrementCardSuccessSafely(store, order, attemptId, succeededCardId, card, now);
       return {
         ok: true,
         result: runnerResult,

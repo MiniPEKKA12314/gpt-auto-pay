@@ -4,6 +4,7 @@ import test from "node:test";
 import { openPlatformDb, PlatformStore } from "../../src/platform/db.mjs";
 import { runPlatformOrderWithRetry } from "../../src/platform/runner_adapter.mjs";
 import { createPlatformPaymentAdapterFactory } from "../../src/platform/order_processor.mjs";
+import { prepareKimooxPerOrderCard, queryVccStoredCardBalance } from "../../src/platform/card_lifecycle.mjs";
 
 test("Kimoox per-order mode opens a new card, runs payment, then withdraws and cancels", async () => {
   const db = openPlatformDb(":memory:");
@@ -212,6 +213,124 @@ test("Kimoox opens a fresh remote card after the configured per-card attempts ar
     assert.equal(opened, 2);
     assert.deepEqual(cancelled, ["kc-1", "kc-2"]);
     assert.match(store.listRunLogs(locked.order.id).map((log) => log.message).join("\n"), /新开下一张卡/);
+  } finally {
+    store.close();
+  }
+});
+
+test("Kimoox balance lookup fails when the requested card is absent", async () => {
+  const store = new PlatformStore(openPlatformDb(":memory:"));
+  try {
+    await assert.rejects(
+      queryVccStoredCardBalance({
+        store,
+        card: { provider: "kimoox", provider_card_id: "wanted-card", number: "4242424242424242" },
+        cardProviderFactory: () => ({
+          async listCards() {
+            return [{ provider_card_id: "different-card", number: "5555555555554444", card_balance: "99.00" }];
+          },
+        }),
+      }),
+      (error) => error.code === "KIMOOX_CARD_NOT_FOUND",
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("Kimoox open-card webhook can complete a pending API task", async () => {
+  const store = new PlatformStore(openPlatformDb(":memory:"), { secretKey: "local-development-secret" });
+  try {
+    const cardGroupId = store.createCardGroup({ name: "webhook cards" }, 800);
+    const retryRuntime = {};
+    const provider = {
+      async openCard(input) {
+        store.insertWebhookEvent({
+          provider: "kimoox",
+          event_id: "evt-open-success",
+          event_type: "CARD_OPEN.SUCCESS",
+          payload: {
+            eventId: "evt-open-success",
+            eventType: "CARD_OPEN.SUCCESS",
+            data: { requestNo: input.requestNo, cardId: "webhook-card-1", status: "SUCCESS" },
+          },
+        }, 801);
+        return { requestNo: input.requestNo, applyStatus: "SUBMITTED" };
+      },
+      async getOpenCardDetail() {
+        return { applyStatus: "SUBMITTED" };
+      },
+      async listCardsWithPrivateInfo(input) {
+        assert.equal(input.cardId, "webhook-card-1");
+        return [{
+          provider_card_id: "webhook-card-1",
+          number: "4242424242424242",
+          exp_month: "12",
+          exp_year: "2030",
+          cvc: "123",
+          masked_number: "4242****4242",
+        }];
+      },
+    };
+    const result = await prepareKimooxPerOrderCard({
+      store,
+      order: { id: 1, order_no: "ord_webhook_open" },
+      plan: {
+        card_source: "kimoox",
+        card_groups: [{ card_group_id: cardGroupId, priority: 1 }],
+        vcc_target_balance_usd: "20.00",
+        kimoox_card_bin_id: "bin-webhook",
+        kimoox_card_type: "PREPAID",
+      },
+      retryRuntime,
+      emit() {},
+      cardProviderFactory: () => provider,
+      kimooxOpenTimeoutMs: 1000,
+      now: () => 802,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.card.provider_card_id, "webhook-card-1");
+    assert.equal(retryRuntime.kimooxRequestNo.includes("ord_webhook_open"), true);
+  } finally {
+    store.close();
+  }
+});
+
+test("Kimoox open-card detail timeout records the request and fails once", async () => {
+  const store = new PlatformStore(openPlatformDb(":memory:"), { secretKey: "local-development-secret" });
+  try {
+    const cardGroupId = store.createCardGroup({ name: "timeout cards" }, 900);
+    const retryRuntime = {};
+    let opens = 0;
+    await assert.rejects(
+      prepareKimooxPerOrderCard({
+        store,
+        order: { id: 2, order_no: "ord_open_timeout" },
+        plan: {
+          card_source: "kimoox",
+          card_groups: [{ card_group_id: cardGroupId, priority: 1 }],
+          vcc_target_balance_usd: "20.00",
+          kimoox_card_bin_id: "bin-timeout",
+          kimoox_card_type: "PREPAID",
+        },
+        retryRuntime,
+        emit() {},
+        cardProviderFactory: () => ({
+          async openCard(input) {
+            opens += 1;
+            return { requestNo: input.requestNo, taskId: "pending-task", applyStatus: "SUBMITTED" };
+          },
+          async getOpenCardDetail() { return { taskId: "pending-task", applyStatus: "SUBMITTED" }; },
+          async listCardsWithPrivateInfo() { return []; },
+        }),
+        kimooxOpenTimeoutMs: 1000,
+        now: () => 901,
+      }),
+      (error) => error.code === "KIMOOX_OPEN_CARD_TIMEOUT",
+    );
+    assert.equal(opens, 1);
+    assert.equal(retryRuntime.kimooxOpenSubmitted, true);
+    assert.equal(Boolean(retryRuntime.kimooxRequestNo), true);
   } finally {
     store.close();
   }

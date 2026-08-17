@@ -132,13 +132,13 @@ function selectMatchingRemoteCard(rows = [], card = {}) {
   const targetNum = String(target.cardNum || "").replace(/\D+/g, "");
   if (targetId) {
     const byId = rows.find((row) => String(row.provider_card_id ?? row.providerCardId ?? "") === targetId);
-    if (byId) return byId;
+    return byId ?? null;
   }
   if (targetNum) {
     const byNum = rows.find((row) => String(row.number ?? "").replace(/\D+/g, "") === targetNum);
-    if (byNum) return byNum;
+    return byNum ?? null;
   }
-  return rows.length === 1 ? rows[0] : rows[0];
+  return rows.length === 1 ? rows[0] : null;
 }
 
 async function queryRemoteBalanceWithProvider(provider, card) {
@@ -402,7 +402,7 @@ function extractApplyIds(value = {}, seen = new Set()) {
     seen.add(item);
     for (const [key, raw] of Object.entries(item)) {
       const lower = key.toLowerCase();
-      const text = raw === undefined || raw === null ? "" : String(raw).trim();
+      const text = raw === undefined || raw === null || typeof raw === "object" ? "" : String(raw).trim();
       if (text) {
         if (!out.taskId && ["taskid", "task_id"].includes(lower)) out.taskId = text;
         if (!out.batchNo && ["batchno", "batch_no"].includes(lower)) out.batchNo = text;
@@ -416,6 +416,35 @@ function extractApplyIds(value = {}, seen = new Set()) {
   return out;
 }
 
+function kimooxWebhookState(row = null) {
+  if (!row) return null;
+  let payload = {};
+  try {
+    payload = JSON.parse(String(row.payload_json || "{}"));
+  } catch {
+    payload = {};
+  }
+  const data = payload?.data && typeof payload.data === "object" ? payload.data : {};
+  const text = [
+    row.event_type,
+    payload.eventType,
+    data.status,
+    data.state,
+    data.result,
+    data.operationStatus,
+    data.applyStatus,
+    data.taskStatus,
+  ].filter(Boolean).join(" ").toUpperCase();
+  return {
+    row,
+    payload,
+    data,
+    failed: /FAILED|FAILURE|REJECTED|DECLINED|ERROR|CANCELED|CANCELLED/.test(text),
+    succeeded: /SUCCESS|SUCCEEDED|COMPLETED|FINISHED|APPROVED/.test(text),
+    statusText: text || "WEBHOOK_RECEIVED",
+  };
+}
+
 async function waitForKimooxAppliedCard(provider, applyResult, plan, emit, options = {}) {
   const timeoutMs = Number(options.timeoutMs ?? DEFAULT_BALANCE_TIMEOUT_MS);
   const deadline = Date.now() + Math.max(1_000, timeoutMs);
@@ -423,8 +452,37 @@ async function waitForKimooxAppliedCard(provider, applyResult, plan, emit, optio
   const requestNo = String(options.requestNo ?? applyResult?.requestNo ?? applyResult?.request_no ?? "").trim();
   let detail = applyResult;
   let lastStatus = "";
+  let lastWebhookId = 0;
+  let webhookSucceeded = false;
 
   while (Date.now() < deadline) {
+    const webhookRow = options.store?.listWebhookEvents?.({
+      provider: "kimoox",
+      request_no: requestNo,
+      limit: 1,
+    })?.[0];
+    const webhook = kimooxWebhookState(webhookRow);
+    if (webhook && Number(webhook.row.id) !== lastWebhookId) {
+      lastWebhookId = Number(webhook.row.id);
+      const webhookIds = extractApplyIds({ row: webhook.row, payload: webhook.payload, data: webhook.data });
+      ids.taskId ||= webhookIds.taskId;
+      ids.batchNo ||= webhookIds.batchNo;
+      ids.cardIds.push(...webhookIds.cardIds);
+      ids.cardIds = [...new Set(ids.cardIds.filter(Boolean))];
+      webhookSucceeded ||= webhook.succeeded;
+      emit({
+        level: webhook.failed ? "error" : webhook.succeeded ? "success" : "info",
+        stage: "kimoox_webhook",
+        message: `收到 Kimoox 开卡回调: ${webhook.statusText}`,
+        meta: { event_id: webhook.row.event_id, request_no: requestNo, payload: webhook.payload },
+      });
+      if (webhook.failed) {
+        throw new PlatformStoreError("KIMOOX_OPEN_CARD_FAILED", `Kimoox 开卡回调失败: ${webhook.statusText}`, {
+          webhook: webhook.payload,
+          applyResult,
+        });
+      }
+    }
     const query = {
       taskId: ids.taskId,
       batchNo: ids.batchNo,
@@ -459,12 +517,14 @@ async function waitForKimooxAppliedCard(provider, applyResult, plan, emit, optio
     const cardQueries = [];
     if (ids.batchNo) cardQueries.push({ batchNo: ids.batchNo, pageNum: 1, pageSize: 5 });
     for (const cardId of ids.cardIds) cardQueries.push({ cardId, pageNum: 1, pageSize: 1 });
-    if (successApplyStatus(detail) && cardQueries.length === 0) cardQueries.push({ pageNum: 1, pageSize: 5, remark: requestNo });
+    if ((successApplyStatus(detail) || webhookSucceeded) && cardQueries.length === 0) cardQueries.push({ pageNum: 1, pageSize: 5, remark: requestNo });
 
     for (const query of cardQueries) {
       try {
         const rows = await provider.listCardsWithPrivateInfo(query);
-        const card = rows.find((row) => row.number && row.exp_month && row.exp_year && row.cvc && row.provider_card_id) || rows[0];
+        const card = query.cardId
+          ? rows.find((row) => String(row.provider_card_id || "") === String(query.cardId))
+          : rows.find((row) => row.number && row.exp_month && row.exp_year && row.cvc && row.provider_card_id);
         if (card?.number && card?.provider_card_id) {
           return { card, detail, ids };
         }
@@ -659,8 +719,19 @@ export async function prepareKimooxPerOrderCard(context = {}) {
     meta: { requestNo, cardType, cardBinId, target_balance_usd: amount },
   });
   const applyResult = await provider.openCard(openPayload);
+  if (context.retryRuntime && typeof context.retryRuntime === "object") {
+    const applyIds = extractApplyIds(applyResult);
+    context.retryRuntime.kimooxRequestNo = requestNo;
+    context.retryRuntime.kimooxApplyTaskId = applyIds.taskId;
+    context.retryRuntime.kimooxApplyBatchNo = applyIds.batchNo;
+    context.retryRuntime.kimooxOpenSubmitted = true;
+  }
   emit({ level: "info", stage: "kimoox_open_card", message: "Kimoox 开卡申请已提交", meta: { requestNo, result: applyResult } });
-  const applied = await waitForKimooxAppliedCard(provider, applyResult, plan, emit, { requestNo, timeoutMs: context.kimooxOpenTimeoutMs ?? DEFAULT_BALANCE_TIMEOUT_MS });
+  const applied = await waitForKimooxAppliedCard(provider, applyResult, plan, emit, {
+    requestNo,
+    timeoutMs: context.kimooxOpenTimeoutMs ?? DEFAULT_BALANCE_TIMEOUT_MS,
+    store,
+  });
 
   const remote = applied.card;
   const cardId = store.createCard({

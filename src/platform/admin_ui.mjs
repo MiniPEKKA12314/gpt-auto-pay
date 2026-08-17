@@ -177,6 +177,11 @@ export function renderAdminUi(options = {}) {
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
     }
+    .grid-4 {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
     section {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -208,6 +213,13 @@ export function renderAdminUi(options = {}) {
       font-size: 26px;
       line-height: 1.1;
     }
+    button.metric {
+      width: 100%;
+      color: var(--text);
+      text-align: left;
+      cursor: pointer;
+    }
+    button.metric:hover { border-color: #ef4444; background: #fff7f7; }
     label {
       display: block;
       margin: 10px 0 6px;
@@ -497,7 +509,7 @@ export function renderAdminUi(options = {}) {
       aside { position: static; }
       .nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       .nav button { text-align: center; }
-      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
       .form-grid { grid-template-columns: 1fr; }
     }
   </style>
@@ -553,10 +565,11 @@ export function renderAdminUi(options = {}) {
             <div class="metric"><span>运行订单</span><b id="metricRunning">0</b></div>
             <div class="metric"><span>未使用兑换码</span><b id="metricUnused">0</b></div>
           </div>
-          <div class="grid-3" style="margin-top:12px">
+          <div class="grid-4" style="margin-top:12px">
             <div class="metric"><span>历史成功订单</span><b id="metricHistorySuccess">0</b></div>
             <div class="metric"><span>今日成功订单</span><b id="metricTodaySuccess">0</b></div>
             <div class="metric"><span>今日失败订单</span><b id="metricTodayFailed">0</b></div>
+            <button id="errorCenterBtn" type="button" class="metric"><span>近 24 小时报错订单</span><b id="metricErrorOrders">0</b></button>
           </div>
           <section>
             <h2>队列控制</h2>
@@ -1012,6 +1025,27 @@ export function renderAdminUi(options = {}) {
       </div>
     </main>
   </div>
+  <dialog id="errorCenterDialog" class="secret-dialog" style="width:min(1100px,94vw)">
+    <header>
+      <h2>报错详情</h2>
+      <form method="dialog"><button type="submit">关闭</button></form>
+    </header>
+    <div class="body">
+      <div class="row">
+        <label style="margin:0">开始时间 <input id="errorFrom" type="datetime-local"></label>
+        <label style="margin:0">结束时间 <input id="errorTo" type="datetime-local"></label>
+        <button id="reloadErrorCenterBtn" type="button" class="primary">查询</button>
+      </div>
+      <div id="errorOrdersPane" style="margin-top:14px">
+        <div class="row" style="justify-content:space-between"><h2 style="margin:0">有报错的订单</h2><span id="errorCenterSummary" class="pill"></span></div>
+        <table style="margin-top:10px"><thead><tr><th>订单号</th><th>兑换码</th><th>套餐</th><th>状态</th><th>问题数</th><th>最近报错</th><th>操作</th></tr></thead><tbody id="errorOrdersBody"></tbody></table>
+      </div>
+      <div id="errorLogsPane" hidden style="margin-top:14px">
+        <div class="row"><button id="backErrorOrdersBtn" type="button">返回订单列表</button><h2 id="errorOrderTitle" style="margin:0"></h2></div>
+        <pre id="errorOrderLogsOutput" style="max-height:55vh"></pre>
+      </div>
+    </div>
+  </dialog>
   <dialog id="cardSecretDialog" class="secret-dialog">
     <header>
       <h2>卡片详情</h2>
@@ -1099,7 +1133,9 @@ export function renderAdminUi(options = {}) {
       selectedPlanType: "",
       lastVccBins: [],
       lastKimooxBins: [],
-      orderDetailPlainText: ""
+      orderDetailPlainText: "",
+      errorOrders: [],
+      errorRange: { from: 0, to: 0 }
     };
 
     function h(value) {
@@ -1711,6 +1747,61 @@ export function renderAdminUi(options = {}) {
       state.dashboard = (await api("/api/admin/dashboard")).data;
     }
 
+    function datetimeLocalValue(seconds) {
+      const date = new Date(Number(seconds) * 1000);
+      const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+      return local.toISOString().slice(0, 16);
+    }
+
+    function errorRangeFromInputs() {
+      const to = Math.floor(new Date($("errorTo").value).getTime() / 1000);
+      const from = Math.floor(new Date($("errorFrom").value).getTime() / 1000);
+      if (!Number.isFinite(from) || !Number.isFinite(to) || from <= 0 || to <= from) {
+        throw new Error("请选择有效的报错时间范围");
+      }
+      return { from: from, to: to };
+    }
+
+    function renderErrorOrders(data) {
+      const rows = Array.isArray(data.orders) ? data.orders : [];
+      state.errorOrders = rows;
+      const stats = data.stats || {};
+      $("errorCenterSummary").textContent = "订单 " + (stats.order_count || 0) + " / 问题记录 " + (stats.entry_count || 0);
+      $("errorOrdersBody").innerHTML = rows.length ? rows.map(function(order) {
+        return "<tr><td class='mono'>" + h(order.order_no) + "</td><td class='mono'>" + h(order.redeem_code || "") + "</td><td>" + h(order.plan_type) + "</td><td>" + statusPill(order.status) + "</td><td>" + h(order.problem_count || 0) + "</td><td>" + h(timeText(order.last_problem_at)) + "</td><td><button data-error-order='" + order.id + "'>查看报错</button></td></tr>";
+      }).join("") : "<tr><td colspan='7'>所选时间范围内没有报错订单</td></tr>";
+      $("errorOrdersPane").hidden = false;
+      $("errorLogsPane").hidden = true;
+    }
+
+    async function loadErrorCenter(options = {}) {
+      if (!$("errorFrom").value || !$("errorTo").value || options.reset === true) {
+        const to = Math.floor(Date.now() / 1000);
+        $("errorTo").value = datetimeLocalValue(to);
+        $("errorFrom").value = datetimeLocalValue(to - 86400);
+      }
+      const range = errorRangeFromInputs();
+      state.errorRange = range;
+      const result = await api("/api/admin/error-orders" + queryString(range));
+      renderErrorOrders(result.data || {});
+      const dialog = $("errorCenterDialog");
+      if (!dialog.open && typeof dialog.showModal === "function") dialog.showModal();
+    }
+
+    async function showErrorOrder(orderId) {
+      const range = state.errorRange || errorRangeFromInputs();
+      const result = await api("/api/admin/error-orders/" + Number(orderId) + "/logs" + queryString(range));
+      const order = result.data.order || {};
+      const logs = Array.isArray(result.data.logs) ? result.data.logs : [];
+      $("errorOrderTitle").textContent = "订单 " + (order.order_no || order.id || "");
+      $("errorOrderLogsOutput").textContent = logs.length ? logs.map(function(log) {
+        return "[" + timeText(log.created_at) + "] [" + String(log.level || "error").toUpperCase() + "] [" + (log.stage || log.source || "") + "] " + (log.message || "");
+      }).join("\\n") : "该订单在所选时间范围内没有问题日志";
+      $("errorOrdersPane").hidden = true;
+      $("errorLogsPane").hidden = false;
+      scrollToBottom($("errorOrderLogsOutput"));
+    }
+
     async function loadQueue() {
       state.queue = (await api("/api/admin/queue")).data;
     }
@@ -1884,6 +1975,7 @@ export function renderAdminUi(options = {}) {
       $("metricHistorySuccess").textContent = stats.history_success || 0;
       $("metricTodaySuccess").textContent = stats.today_success || 0;
       $("metricTodayFailed").textContent = stats.today_failed || 0;
+      $("metricErrorOrders").textContent = (dashboard.error_stats && dashboard.error_stats.order_count) || 0;
       $("queueState").textContent = queueStatusLabel(queue.status);
       $("queueState").className = "pill " + (queue.status === "running" ? "ok" : "warn");
       $("queueWorkerState").textContent = workerStatusLabel(queue.worker);
@@ -2952,9 +3044,10 @@ export function renderAdminUi(options = {}) {
     }
 
     document.addEventListener("click", async function(event) {
-      const target = event.target;
-      if (!target || target.tagName !== "BUTTON") return;
+      const target = event.target && event.target.closest ? event.target.closest("button") : null;
+      if (!target) return;
       try {
+        if (target.dataset.errorOrder) await runWithFeedback(target, "正在读取订单报错...", function() { return showErrorOrder(target.dataset.errorOrder); });
         if (target.dataset.tab) setTab(target.dataset.tab);
         if (target.dataset.orderDetail) await runWithFeedback(target, "正在读取订单详情...", function() { return showOrderDetails(target.dataset.orderDetail); });
         if (target.dataset.copyOrderLog) await runWithFeedback(target, "正在复制订单详情...", function() { return copyOrderLog(target.dataset.copyOrderLog); });
@@ -3007,6 +3100,12 @@ export function renderAdminUi(options = {}) {
     $("loginForm").addEventListener("submit", login);
     clickWithFeedback("logoutBtn", "正在退出...", logout);
     clickWithFeedback("refreshBtn", "正在刷新数据...", refreshAll, "数据已刷新");
+    clickWithFeedback("errorCenterBtn", "正在读取报错订单...", function() { return loadErrorCenter({ reset: true }); });
+    clickWithFeedback("reloadErrorCenterBtn", "正在查询报错订单...", loadErrorCenter);
+    $("backErrorOrdersBtn").addEventListener("click", function() {
+      $("errorOrdersPane").hidden = false;
+      $("errorLogsPane").hidden = true;
+    });
     clickWithFeedback("saveQueueBtn", "正在保存队列配置...", saveQueue, "队列配置已保存");
     clickWithFeedback("pauseQueueBtn", "正在暂停队列...", function() { return queueAction("/api/admin/queue/pause"); });
     clickWithFeedback("resumeQueueBtn", "正在恢复队列...", function() { return queueAction("/api/admin/queue/resume"); });

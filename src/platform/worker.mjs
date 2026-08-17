@@ -38,38 +38,63 @@ export async function runQueueOnce(store, adapterFactory, options = {}) {
   if (typeof adapterFactory !== "function") throw new Error("adapterFactory is required");
   const now = options.now ?? defaultNow;
   const started = store.dispatchQueuedOrders(now(), { ignorePaused: options.ignorePaused === true });
-  const results = [];
-
-  for (const order of started) {
-    const result = await runPlatformOrderWithRetry(store, order.id, async (context) => {
-      try {
-        return await adapterFactory({
-          store,
-          order: context.order,
-          plan: context.plan,
-          card: context.card,
-          billingAddress: context.billingAddress,
-          attemptNo: context.attemptNo,
-          attemptId: context.attemptId,
-          retry: context.retry,
-          signal: options.signal,
-        });
-      } catch (error) {
-        return failingAdapter(error);
+  const results = await Promise.all(started.map(async (order) => {
+    try {
+      const result = await runPlatformOrderWithRetry(store, order.id, async (context) => {
+        try {
+          return await adapterFactory({
+            store,
+            order: context.order,
+            plan: context.plan,
+            card: context.card,
+            billingAddress: context.billingAddress,
+            attemptNo: context.attemptNo,
+            attemptId: context.attemptId,
+            retry: context.retry,
+            signal: options.signal,
+          });
+        } catch (error) {
+          return failingAdapter(error);
+        }
+      }, {
+        now,
+        signal: options.signal,
+        fetchImpl: options.fetchImpl,
+        cardProviderFactory: options.cardProviderFactory,
+      });
+      return {
+        order_id: order.id,
+        order_no: order.order_no,
+        ok: result.ok === true,
+        result,
+      };
+    } catch (error) {
+      store.addRunLog({
+        order_id: order.id,
+        attempt_id: 0,
+        level: "error",
+        stage: "queue_worker",
+        message: error.message || String(error),
+        meta: { code: error.code || "QUEUE_ORDER_EXCEPTION" },
+      }, now());
+      let failedOrder = store.getOrderById(order.id);
+      if (failedOrder.status !== "succeeded") {
+        try {
+          failedOrder = store.markOrderFailedAndReleaseCode(order.id, {
+            admin_error: error.message || String(error),
+          }, now()).order;
+        } catch {
+          failedOrder = store.getOrderById(order.id);
+        }
       }
-    }, {
-      now,
-      signal: options.signal,
-      fetchImpl: options.fetchImpl,
-      cardProviderFactory: options.cardProviderFactory,
-    });
-    results.push({
-      order_id: order.id,
-      order_no: order.order_no,
-      ok: result.ok === true,
-      result,
-    });
-  }
+      return {
+        order_id: order.id,
+        order_no: order.order_no,
+        ok: false,
+        result: { ok: false, order: failedOrder, error: error.message || String(error) },
+      };
+    }
+  }));
 
   const paused = pauseQueueAfterFailureIfEnabled(store, { results }, now());
   return {

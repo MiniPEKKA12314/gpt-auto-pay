@@ -74,6 +74,37 @@ test("runQueueOnce drains queued orders through the injected adapter", async () 
   }
 });
 
+test("runQueueOnce executes dispatched orders concurrently", async () => {
+  const { store } = createWorkerStore(2);
+  try {
+    store.setQueueSettings({ global_concurrency: 2 }, 1, 20);
+    let active = 0;
+    let maxActive = 0;
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let entered = 0;
+
+    const running = runQueueOnce(store, async () => ({
+      async execute() {
+        active += 1;
+        entered += 1;
+        maxActive = Math.max(maxActive, active);
+        if (entered === 2) release();
+        await gate;
+        active -= 1;
+        return { status: "success", message: "concurrent success" };
+      },
+    }), { now: () => 100 });
+
+    const result = await running;
+    assert.equal(result.results.length, 2);
+    assert.equal(maxActive, 2);
+    assert.equal(result.results.every((row) => row.ok), true);
+  } finally {
+    store.close();
+  }
+});
+
 test("runQueueOnce respects paused queues", async () => {
   const { store, orders } = createWorkerStore(1);
   try {

@@ -9,7 +9,7 @@ import { verifyKimooxWebhook } from "./kimoox_webhook.mjs";
 import { createVccCardProvider } from "./card_provider_vcc.mjs";
 import { renderDevUi } from "./dev_ui.mjs";
 import { PlatformStoreError } from "./db.mjs";
-import { OrderStatus } from "./constants.mjs";
+import { nowSeconds, OrderStatus } from "./constants.mjs";
 import { createPlatformPaymentAdapterFactory } from "./order_processor.mjs";
 import { publicOrderSummary } from "./orders.mjs";
 import { testProxyConnectivity } from "./proxy_connectivity.mjs";
@@ -504,6 +504,21 @@ export function createPlatformRequestHandler(options = {}) {
           event_type: verified.eventType,
           payload: verified.payload,
         });
+        const requestNo = String(verified.payload?.data?.requestNo ?? verified.payload?.data?.request_no ?? "");
+        const relatedOrder = store.findOrderByExternalRequestNo(requestNo);
+        if (relatedOrder && stored.inserted) {
+          const eventText = String(verified.eventType || "").toUpperCase();
+          const failed = /FAILED|FAILURE|REJECTED|DECLINED|ERROR|CANCELED|CANCELLED/.test(eventText);
+          const succeeded = /SUCCESS|SUCCEEDED|COMPLETED|FINISHED|APPROVED/.test(eventText);
+          store.addRunLog({
+            order_id: relatedOrder.id,
+            attempt_id: 0,
+            level: failed ? "error" : succeeded ? "success" : "info",
+            stage: "kimoox_webhook",
+            message: `Kimoox Webhook: ${verified.eventType}; requestNo=${requestNo}`,
+            meta: { event_id: verified.eventId, event_type: verified.eventType, request_no: requestNo },
+          });
+        }
         console.log(`[kimoox-webhook] ${stored.inserted ? "received" : "duplicate"} ${verified.eventType} ${verified.eventId}`);
         sendText(res, 200, "ok");
         return;
@@ -772,6 +787,36 @@ export function createPlatformRequestHandler(options = {}) {
           },
         });
         sendJson(res, 200, { ok: true, data: result });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/admin/error-orders") {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const to = Number(url.searchParams.get("to") || nowSeconds());
+        const from = Number(url.searchParams.get("from") || (to - 86400));
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            stats: store.errorOrderStats({ from, to }),
+            orders: store.listErrorOrders({ from, to, limit: url.searchParams.get("limit") || 200 }),
+          },
+        });
+        return;
+      }
+
+      const errorOrderLogs = url.pathname.match(/^\/api\/admin\/error-orders\/(\d+)\/logs$/);
+      if (req.method === "GET" && errorOrderLogs) {
+        if (!requireAdmin(req, res, adminToken, url)) return;
+        const to = Number(url.searchParams.get("to") || nowSeconds());
+        const from = Number(url.searchParams.get("from") || 0);
+        const orderId = Number(errorOrderLogs[1]);
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            order: store.getOrderById(orderId),
+            logs: store.listOrderProblemLogs(orderId, { from, to }),
+          },
+        });
         return;
       }
 

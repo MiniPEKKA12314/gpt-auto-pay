@@ -98,6 +98,15 @@ export function classifyAttemptResult(result = {}) {
   }
 
   const text = textOf(result);
+  if (/kimoox_open_card_timeout|kimoox_open_card_failed/.test(text)) {
+    return {
+      ok: false,
+      category: "card_provider_open_terminal",
+      retry_proxy: false,
+      switch_card: false,
+      terminal: true,
+    };
+  }
   if (/missing x server|\$display|platform failed to initialize|chrome exited before devtools became available|no usable sandbox/.test(text)) {
     return {
       ok: false,

@@ -139,3 +139,30 @@ test("successful attempts complete without another retry", () => {
   assert.equal(decision.exhausted, false);
   assert.equal(decision.next, null);
 });
+
+test("Kimoox open-card timeout is terminal and never switches cards", () => {
+  const classification = classifyAttemptResult({
+    ok: false,
+    status: "failed",
+    code: "KIMOOX_OPEN_CARD_TIMEOUT",
+    message: "Kimoox open-card detail timed out",
+  });
+  assert.deepEqual(classification, {
+    ok: false,
+    category: "card_provider_open_terminal",
+    retry_proxy: false,
+    switch_card: false,
+    terminal: true,
+  });
+  assert.equal(decideNextRetry({
+    code: "KIMOOX_OPEN_CARD_TIMEOUT",
+    message: "timed out",
+  }, {
+    card_source: "kimoox",
+    max_proxy_attempts_per_card: 2,
+    remote_max_cards: 3,
+  }, {
+    card_attempt_index: 0,
+    proxy_attempt_index: 0,
+  }).action, "stop");
+});

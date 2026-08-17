@@ -754,6 +754,15 @@ export class PlatformStore {
     return this.getCardById(cardId);
   }
 
+  touchCardLastUsed(cardId, now = nowSeconds()) {
+    this.db.prepare(`
+      UPDATE cards
+         SET last_used_at = ?, updated_at = ?
+       WHERE id = ? AND deleted_at = 0
+    `).run(now, now, Number(cardId));
+    return this.getCardById(cardId);
+  }
+
   createBillingGroup(input = {}, now = nowSeconds()) {
     const name = requiredText(input.name, "name");
     const note = String(input.note ?? "");
@@ -943,6 +952,15 @@ export class PlatformStore {
 
   restoreBillingAddress(addressId) {
     return this.enableBillingAddress(addressId);
+  }
+
+  touchBillingAddressLastUsed(addressId, now = nowSeconds()) {
+    this.db.prepare(`
+      UPDATE billing_addresses
+         SET last_used_at = ?, updated_at = ?
+       WHERE id = ? AND deleted_at = 0
+    `).run(now, now, Number(addressId));
+    return this.getBillingAddressById(addressId);
   }
 
   createProxyGroup(input = {}, now = nowSeconds()) {
@@ -1916,6 +1934,97 @@ export class PlatformStore {
     };
   }
 
+  errorOrderStats(input = {}) {
+    const to = Number(input.to ?? nowSeconds());
+    const from = Number(input.from ?? (to - 86400));
+    const row = this.db.prepare(`
+      WITH problems AS (
+        SELECT order_id, created_at
+          FROM run_logs
+         WHERE deleted_at = 0 AND LOWER(level) IN ('warn', 'error', 'fatal', 'failed', 'failure')
+        UNION ALL
+        SELECT order_id, CASE WHEN finished_at > 0 THEN finished_at ELSE created_at END
+          FROM order_attempts
+         WHERE error_code <> '' OR error_message <> ''
+        UNION ALL
+        SELECT id, CASE WHEN updated_at > 0 THEN updated_at ELSE created_at END
+          FROM orders
+         WHERE admin_error <> ''
+      )
+      SELECT COUNT(DISTINCT p.order_id) AS order_count, COUNT(*) AS entry_count
+        FROM problems p
+        JOIN orders o ON o.id = p.order_id
+       WHERE o.deleted_at = 0 AND p.created_at >= ? AND p.created_at <= ?
+    `).get(from, to);
+    return {
+      from,
+      to,
+      order_count: Number(row?.order_count ?? 0),
+      entry_count: Number(row?.entry_count ?? 0),
+    };
+  }
+
+  listErrorOrders(input = {}) {
+    const to = Number(input.to ?? nowSeconds());
+    const from = Number(input.from ?? (to - 86400));
+    const limit = Math.max(1, Math.min(1000, Number(input.limit ?? 200)));
+    return this.db.prepare(`
+      WITH problems AS (
+        SELECT order_id, created_at
+          FROM run_logs
+         WHERE deleted_at = 0 AND LOWER(level) IN ('warn', 'error', 'fatal', 'failed', 'failure')
+        UNION ALL
+        SELECT order_id, CASE WHEN finished_at > 0 THEN finished_at ELSE created_at END
+          FROM order_attempts
+         WHERE error_code <> '' OR error_message <> ''
+        UNION ALL
+        SELECT id, CASE WHEN updated_at > 0 THEN updated_at ELSE created_at END
+          FROM orders
+         WHERE admin_error <> ''
+      )
+      SELECT o.*, rc.code_display AS redeem_code,
+             COUNT(*) AS problem_count, MAX(p.created_at) AS last_problem_at
+        FROM problems p
+        JOIN orders o ON o.id = p.order_id
+        LEFT JOIN redeem_codes rc ON rc.id = o.redeem_code_id
+       WHERE o.deleted_at = 0 AND p.created_at >= ? AND p.created_at <= ?
+       GROUP BY o.id
+       ORDER BY last_problem_at DESC, o.id DESC
+       LIMIT ?
+    `).all(from, to, limit);
+  }
+
+  listOrderProblemLogs(orderId, input = {}) {
+    const to = Number(input.to ?? nowSeconds());
+    const from = Number(input.from ?? 0);
+    return this.db.prepare(`
+      SELECT * FROM (
+        SELECT 'run_log' AS source, id AS source_id, order_id, attempt_id,
+               LOWER(level) AS level, stage, message, meta_json, created_at
+          FROM run_logs
+         WHERE order_id = ? AND deleted_at = 0
+           AND LOWER(level) IN ('warn', 'error', 'fatal', 'failed', 'failure')
+        UNION ALL
+        SELECT 'attempt' AS source, id AS source_id, order_id, id AS attempt_id,
+               'error' AS level, stage,
+               TRIM(CASE WHEN error_code <> '' THEN error_code || ': ' ELSE '' END || error_message) AS message,
+               '{}' AS meta_json,
+               CASE WHEN finished_at > 0 THEN finished_at ELSE created_at END AS created_at
+          FROM order_attempts
+         WHERE order_id = ? AND (error_code <> '' OR error_message <> '')
+        UNION ALL
+        SELECT 'order' AS source, id AS source_id, id AS order_id, 0 AS attempt_id,
+               'error' AS level, 'order' AS stage, admin_error AS message,
+               '{}' AS meta_json,
+               CASE WHEN updated_at > 0 THEN updated_at ELSE created_at END AS created_at
+          FROM orders
+         WHERE id = ? AND admin_error <> ''
+      )
+      WHERE created_at >= ? AND created_at <= ?
+      ORDER BY created_at ASC, source_id ASC
+    `).all(Number(orderId), Number(orderId), Number(orderId), from, to);
+  }
+
   queueSnapshot() {
     const settings = this.getQueueSettings();
     const counts = this.orderCountsByStatus();
@@ -1999,18 +2108,29 @@ export class PlatformStore {
       if (order.status === OrderStatus.SUCCEEDED) {
         throw new PlatformStoreError("ORDER_ALREADY_SUCCEEDED", "Payment has already been confirmed; the order cannot be requeued");
       }
+      const codeUpdate = this.db.prepare(`
+        UPDATE redeem_codes
+           SET status = ?, locked_order_id = ?, locked_at = ?,
+               unavailable_at = 0, unavailable_reason = ''
+         WHERE id = ?
+           AND used_order_id = 0
+           AND (
+             locked_order_id = ?
+             OR (locked_order_id = 0 AND status = ?)
+           )
+      `).run(RedeemStatus.LOCKED, order.id, now, order.redeem_code_id, order.id, RedeemStatus.UNUSED);
+      if (Number(codeUpdate.changes) !== 1) {
+        throw new PlatformStoreError(
+          "REDEEM_CODE_OWNERSHIP_CONFLICT",
+          "The redeem code is owned by another order and cannot be requeued",
+        );
+      }
       this.db.prepare(`
         UPDATE orders
            SET status = ?, queued_at = ?, updated_at = ?,
                public_message = '', admin_error = ''
          WHERE id = ?
       `).run(OrderStatus.QUEUED, now, now, order.id);
-      this.db.prepare(`
-        UPDATE redeem_codes
-           SET status = ?, locked_order_id = ?, locked_at = ?,
-               unavailable_at = 0, unavailable_reason = ''
-         WHERE id = ?
-      `).run(RedeemStatus.LOCKED, order.id, now, order.redeem_code_id);
       return {
         order: this.getOrderById(order.id),
         redeemCode: this.getRedeemCodeById(order.redeem_code_id),
@@ -2046,17 +2166,25 @@ export class PlatformStore {
     if (normalizedAction === "discard") {
       return runTransaction(this.db, () => {
         const order = this.getOrderById(orderId);
+        const codeUpdate = this.db.prepare(`
+          UPDATE redeem_codes
+             SET status = ?, locked_order_id = ?, locked_at = ?
+           WHERE id = ?
+             AND used_order_id = 0
+             AND (locked_order_id = ? OR (locked_order_id = 0 AND status = ?))
+        `).run(RedeemStatus.DISABLED, order.id, now, order.redeem_code_id, order.id, RedeemStatus.UNUSED);
+        if (Number(codeUpdate.changes) !== 1) {
+          throw new PlatformStoreError(
+            "REDEEM_CODE_OWNERSHIP_CONFLICT",
+            "The redeem code is owned by another order and cannot be discarded",
+          );
+        }
         this.db.prepare(`
           UPDATE orders
              SET status = ?, admin_error = ?, finished_at = CASE WHEN finished_at = 0 THEN ? ELSE finished_at END,
                  updated_at = ?
            WHERE id = ?
         `).run(OrderStatus.FAILED, "interrupted_discarded_by_admin", now, now, order.id);
-        this.db.prepare(`
-          UPDATE redeem_codes
-             SET status = ?
-           WHERE id = ?
-        `).run(RedeemStatus.DISABLED, order.redeem_code_id);
         return {
           order: this.getOrderById(order.id),
           redeemCode: this.getRedeemCodeById(order.redeem_code_id),
@@ -2089,17 +2217,30 @@ export class PlatformStore {
           redeemCode: this.getRedeemCodeById(order.redeem_code_id),
         };
       }
+      const codeUpdate = this.db.prepare(`
+        UPDATE redeem_codes
+           SET status = ?, used_order_id = ?, used_at = ?,
+               locked_order_id = 0, locked_at = 0,
+               unavailable_at = 0, unavailable_reason = ''
+         WHERE id = ?
+           AND (
+             locked_order_id = ?
+             OR used_order_id = ?
+             OR (locked_order_id = 0 AND used_order_id = 0 AND status = ?)
+           )
+      `).run(RedeemStatus.USED, order.id, now, order.redeem_code_id, order.id, order.id, RedeemStatus.UNUSED);
+      if (Number(codeUpdate.changes) !== 1) {
+        throw new PlatformStoreError(
+          "REDEEM_CODE_OWNERSHIP_CONFLICT",
+          "The redeem code is owned by another order and cannot be marked used",
+        );
+      }
       this.db.prepare(`
         UPDATE orders
            SET status = ?, finished_at = CASE WHEN finished_at = 0 THEN ? ELSE finished_at END,
                updated_at = ?
          WHERE id = ?
       `).run(OrderStatus.SUCCEEDED, now, now, order.id);
-      this.db.prepare(`
-        UPDATE redeem_codes
-           SET status = ?, used_order_id = ?, used_at = ?
-         WHERE id = ?
-      `).run(RedeemStatus.USED, order.id, now, order.redeem_code_id);
       return {
         order: this.getOrderById(order.id),
         redeemCode: this.getRedeemCodeById(order.redeem_code_id),
@@ -2121,6 +2262,39 @@ export class PlatformStore {
       const lockCode = boolInt(order.lock_redeem_code_on_failure) === 1 || boolInt(lockSetting) === 1;
       const codeStatus = lockCode ? RedeemStatus.UNAVAILABLE : RedeemStatus.UNUSED;
       const unavailableReason = String(fields.unavailable_reason ?? fields.unavailableReason ?? "充值失败后按套餐设置锁定兑换码");
+      const codeUpdate = this.db.prepare(`
+        UPDATE redeem_codes
+           SET status = ?,
+               locked_order_id = CASE WHEN ? THEN ? ELSE 0 END,
+               locked_at = CASE WHEN ? THEN ? ELSE 0 END,
+               unavailable_at = CASE WHEN ? THEN ? ELSE 0 END,
+               unavailable_reason = CASE WHEN ? THEN ? ELSE '' END
+         WHERE id = ?
+           AND used_order_id = 0
+           AND (
+             locked_order_id = ?
+             OR (locked_order_id = 0 AND status = ?)
+           )
+      `).run(
+        codeStatus,
+        lockCode ? 1 : 0,
+        order.id,
+        lockCode ? 1 : 0,
+        now,
+        lockCode ? 1 : 0,
+        lockCode ? now : 0,
+        lockCode ? 1 : 0,
+        lockCode ? unavailableReason : "",
+        order.redeem_code_id,
+        order.id,
+        RedeemStatus.UNUSED,
+      );
+      if (Number(codeUpdate.changes) !== 1) {
+        throw new PlatformStoreError(
+          "REDEEM_CODE_OWNERSHIP_CONFLICT",
+          "The redeem code is owned by another order and cannot be released",
+        );
+      }
       this.db.prepare(`
         UPDATE orders
            SET status = ?, public_message = ?, admin_error = ?,
@@ -2134,22 +2308,6 @@ export class PlatformStore {
         now,
         now,
         order.id,
-      );
-      this.db.prepare(`
-        UPDATE redeem_codes
-           SET status = ?, locked_order_id = 0, locked_at = 0,
-               unavailable_at = CASE WHEN ? THEN ? ELSE 0 END,
-               unavailable_reason = CASE WHEN ? THEN ? ELSE '' END
-         WHERE id = ? AND status IN (?, ?)
-      `).run(
-        codeStatus,
-        lockCode ? 1 : 0,
-        lockCode ? now : 0,
-        lockCode ? 1 : 0,
-        lockCode ? unavailableReason : "",
-        order.redeem_code_id,
-        RedeemStatus.LOCKED,
-        RedeemStatus.UNAVAILABLE,
       );
       return {
         order: this.getOrderById(order.id),
@@ -2191,6 +2349,7 @@ export class PlatformStore {
       queue: this.queueSnapshot(),
       orders: countByStatus("orders"),
       order_stats: this.orderSuccessStats(),
+      error_stats: this.errorOrderStats(),
       redeem_codes: countByStatus("redeem_codes"),
       cards: countByStatus("cards"),
       queued_orders: this.listOrders({ status: OrderStatus.QUEUED, order: "queued", limit: 20 }),
@@ -2226,10 +2385,50 @@ export class PlatformStore {
 
   listWebhookEvents(input = {}) {
     const provider = String(input.provider ?? "").trim();
+    const requestNo = String(input.request_no ?? input.requestNo ?? "").trim();
+    const providerCardId = String(input.provider_card_id ?? input.providerCardId ?? "").trim();
     const limit = Math.max(1, Math.min(1000, Number(input.limit ?? 100)));
-    return provider
-      ? this.db.prepare("SELECT * FROM webhook_events WHERE provider = ? ORDER BY id DESC LIMIT ?").all(provider, limit)
-      : this.db.prepare("SELECT * FROM webhook_events ORDER BY id DESC LIMIT ?").all(limit);
+    const where = [];
+    const params = [];
+    if (provider) {
+      where.push("provider = ?");
+      params.push(provider);
+    }
+    if (requestNo) {
+      where.push("request_no = ?");
+      params.push(requestNo);
+    }
+    if (providerCardId) {
+      where.push("provider_card_id = ?");
+      params.push(providerCardId);
+    }
+    params.push(limit);
+    return this.db.prepare(`
+      SELECT *
+      FROM webhook_events
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(...params);
+  }
+
+  findOrderByExternalRequestNo(requestNo) {
+    const value = String(requestNo ?? "").trim();
+    if (!value) return null;
+    const row = this.db.prepare(`
+      SELECT o.*
+        FROM run_logs rl
+        JOIN orders o ON o.id = rl.order_id
+       WHERE rl.deleted_at = 0 AND rl.meta_json LIKE ?
+       ORDER BY rl.id DESC
+       LIMIT 1
+    `).get(`%${value}%`);
+    if (row) return row;
+    return this.db.prepare(`
+      SELECT * FROM orders
+       WHERE ? LIKE '%' || order_no || '%'
+       ORDER BY id DESC LIMIT 1
+    `).get(value) ?? null;
   }
 
   insertAuditLog(audit) {

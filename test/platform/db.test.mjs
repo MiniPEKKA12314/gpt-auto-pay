@@ -404,3 +404,102 @@ test("failure locking applies to every failure route and succeeded orders are im
     /already been confirmed/,
   );
 }));
+
+test("an old order cannot mutate a redeem code owned by a newer order", () => withStore((store) => {
+  store.createRedeemBatchWithCodes({
+    name: "ownership batch",
+    plan_type: "plus",
+    quantity: 1,
+    codeFactory: () => "PLUS-OWNERSHIP-1",
+  }, 130);
+
+  const oldOrder = store.lockCodeAndCreateOrder({ code: "PLUS-OWNERSHIP-1", order_no: "ord_old" }, 131);
+  store.markOrderFailedAndReleaseCode(oldOrder.order.id, { admin_error: "first attempt failed" }, 132);
+  const newOrder = store.lockCodeAndCreateOrder({ code: "PLUS-OWNERSHIP-1", order_no: "ord_new" }, 133);
+
+  for (const mutate of [
+    () => store.requeueOrder(oldOrder.order.id, 134),
+    () => store.terminateOrder(oldOrder.order.id, "late terminate", 135),
+    () => store.markOrderSucceeded(oldOrder.order.id, 136),
+  ]) {
+    assert.throws(
+      mutate,
+      (error) => error instanceof PlatformStoreError && error.code === "REDEEM_CODE_OWNERSHIP_CONFLICT",
+    );
+  }
+
+  const code = store.getRedeemCodeByDisplay("PLUS-OWNERSHIP-1");
+  assert.equal(code.status, RedeemStatus.LOCKED);
+  assert.equal(code.locked_order_id, newOrder.order.id);
+  assert.equal(store.getOrderById(newOrder.order.id).status, OrderStatus.QUEUED);
+}));
+
+test("failure-locked redeem codes retain their order lookup", () => withStore((store) => {
+  store.createRedeemBatchWithCodes({
+    name: "query locked failure batch",
+    plan_type: "plus",
+    quantity: 1,
+    codeFactory: () => "PLUS-QUERY-LOCKED",
+  }, 140);
+  const locked = store.lockCodeAndCreateOrder({ code: "PLUS-QUERY-LOCKED", order_no: "ord_query_locked" }, 141);
+  const failed = store.markOrderFailedAndReleaseCode(locked.order.id, {
+    admin_error: "uncertain payment",
+    lock_redeem_code_on_failure: true,
+  }, 142);
+
+  assert.equal(failed.redeemCode.status, RedeemStatus.UNAVAILABLE);
+  assert.equal(failed.redeemCode.locked_order_id, locked.order.id);
+  assert.equal(store.getOrderForRedeemCodeDisplay("PLUS-QUERY-LOCKED").order_no, "ord_query_locked");
+}));
+
+test("error center groups warning and error records by order and time range", () => withStore((store) => {
+  store.createRedeemBatchWithCodes({
+    name: "error center batch",
+    plan_type: "plus",
+    quantity: 1,
+    codeFactory: () => "PLUS-ERROR-CENTER",
+  }, 150);
+  const locked = store.lockCodeAndCreateOrder({ code: "PLUS-ERROR-CENTER", order_no: "ord_error_center" }, 151);
+  store.addRunLog({ order_id: locked.order.id, level: "info", stage: "start", message: "normal" }, 152);
+  store.addRunLog({ order_id: locked.order.id, level: "warn", stage: "proxy", message: "proxy slow" }, 153);
+  store.addRunLog({ order_id: locked.order.id, level: "error", stage: "payment", message: "payment failed" }, 154);
+
+  const stats = store.errorOrderStats({ from: 150, to: 160 });
+  assert.equal(stats.order_count, 1);
+  assert.equal(stats.entry_count, 2);
+  assert.equal(store.listErrorOrders({ from: 150, to: 160 })[0].order_no, "ord_error_center");
+  assert.deepEqual(
+    store.listOrderProblemLogs(locked.order.id, { from: 150, to: 160 }).map((row) => row.message),
+    ["proxy slow", "payment failed"],
+  );
+}));
+
+test("touching selected cards and billing addresses completes equal-priority rotation", () => withStore((store) => {
+  const cardGroupId = store.createCardGroup({ name: "rotation cards" }, 160);
+  const firstCardId = store.createCard({
+    card_group_id: cardGroupId,
+    number: "4242424242424242",
+    exp_month: "12",
+    exp_year: "2030",
+    cvc: "123",
+    priority: 1,
+  }, 161);
+  const secondCardId = store.createCard({
+    card_group_id: cardGroupId,
+    number: "5555555555554444",
+    exp_month: "12",
+    exp_year: "2030",
+    cvc: "123",
+    priority: 1,
+  }, 162);
+  assert.equal(store.listCards({ card_group_id: cardGroupId })[0].id, firstCardId);
+  store.touchCardLastUsed(firstCardId, 170);
+  assert.equal(store.listCards({ card_group_id: cardGroupId })[0].id, secondCardId);
+
+  const billingGroupId = store.createBillingGroup({ name: "rotation billing" }, 163);
+  const firstAddressId = store.createBillingAddress({ billing_group_id: billingGroupId, name: "A", country: "US", city: "A", line1: "1 A", postal_code: "10001", priority: 1 }, 164);
+  const secondAddressId = store.createBillingAddress({ billing_group_id: billingGroupId, name: "B", country: "US", city: "B", line1: "2 B", postal_code: "10002", priority: 1 }, 165);
+  assert.equal(store.listBillingAddresses({ billing_group_id: billingGroupId })[0].id, firstAddressId);
+  store.touchBillingAddressLastUsed(firstAddressId, 170);
+  assert.equal(store.listBillingAddresses({ billing_group_id: billingGroupId })[0].id, secondAddressId);
+}));

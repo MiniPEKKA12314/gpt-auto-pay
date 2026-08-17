@@ -55,6 +55,70 @@ function formatUsdFromCents(value) {
   return (Number(value || 0) / 100).toFixed(2);
 }
 
+async function confirmPaymentByBalanceDecrease({ plan, originalResult, balanceBeforePayment, lifecycleContext, emit, timeoutMs, pollMs }) {
+  if (!canUseBalanceSuccessFallback(plan, originalResult) || !balanceBeforePayment || !lifecycleContext) return originalResult;
+  const beforeCents = Number(balanceBeforePayment.balance_cents || 0);
+  if (beforeCents <= 0) return originalResult;
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs || 0));
+  let lastObservation = "";
+  emit({
+    level: "info",
+    stage: "payment_balance_check",
+    message: `页面未返回成功，开始余额兜底监控（最多 ${Math.ceil(Math.max(0, Number(timeoutMs || 0)) / 1000)} 秒）...`,
+    meta: { before_balance_usd: formatUsdFromCents(beforeCents), threshold_percent: 50 },
+  });
+  do {
+    try {
+      const balanceAfterPayment = await queryVccStoredCardBalance(lifecycleContext);
+      const afterCents = Number(balanceAfterPayment.balance_cents || 0);
+      const decreaseCents = Math.max(0, beforeCents - afterCents);
+      const decreaseRatio = decreaseCents / beforeCents;
+      const decreasePercent = Number((decreaseRatio * 100).toFixed(2));
+      const observation = `${afterCents}:${decreasePercent}`;
+      if (observation !== lastObservation) {
+        lastObservation = observation;
+        emit({
+          level: decreaseRatio > 0.5 ? "success" : "info",
+          stage: "payment_balance_check",
+          message: `付款后余额核验: ${formatUsdFromCents(beforeCents)} -> ${formatUsdFromCents(afterCents)} USD，下降 ${decreasePercent.toFixed(2)}%`,
+          meta: { before_balance_usd: formatUsdFromCents(beforeCents), after_balance_usd: formatUsdFromCents(afterCents), decrease_percent: decreasePercent },
+        });
+      }
+      if (decreaseRatio > 0.5) {
+        const result = {
+          ok: true,
+          status: "success",
+          code: "DIRECT_CARD_SUCCEEDED_BY_BALANCE",
+          message: `远程卡余额从 ${formatUsdFromCents(beforeCents)} 降至 ${formatUsdFromCents(afterCents)} USD，下降 ${decreasePercent.toFixed(2)}%，按充值成功处理`,
+          runner: originalResult?.runner,
+          balanceFallback: {
+            matched: true,
+            before_balance_usd: formatUsdFromCents(beforeCents),
+            after_balance_usd: formatUsdFromCents(afterCents),
+            decrease_usd: formatUsdFromCents(decreaseCents),
+            decrease_percent: decreasePercent,
+            threshold_percent: 50,
+            original_code: originalResult?.code || "",
+            original_message: originalResult?.message || "",
+          },
+        };
+        emit({ level: "success", stage: "payment_balance_check", message: result.message, meta: result.balanceFallback });
+        return result;
+      }
+    } catch (error) {
+      const observation = `error:${error.message || error}`;
+      if (observation !== lastObservation) {
+        lastObservation = observation;
+        emit({ level: "warn", stage: "payment_balance_check", message: `付款后余额核验暂时失败，将继续重试: ${error.message || error}` });
+      }
+    }
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(Math.max(100, Number(pollMs || 0)), Math.max(100, deadline - Date.now())));
+  } while (Date.now() <= deadline);
+  emit({ level: "warn", stage: "payment_balance_check", message: "余额兜底监控结束，未满足余额下降超过 50% 的成功条件", meta: { original_code: originalResult?.code || "" } });
+  return originalResult;
+}
+
 function proxyGroupForPlan(store, plan, field) {
   const groupId = Number(plan?.[field] ?? 0);
   if (!groupId) return null;
@@ -394,7 +458,19 @@ export class PlatformPaymentAttemptAdapter {
         phase: "direct_card",
         error,
       });
-      lifecycleAfterAction = "freeze_failure";
+      if (directStarted && balanceBeforePayment) {
+        directResult = await confirmPaymentByBalanceDecrease({
+          plan: context.plan,
+          originalResult: directResult,
+          balanceBeforePayment,
+          lifecycleContext,
+          emit,
+          timeoutMs: this.directCardAdapterOptions.balanceSuccessFallbackTimeoutMs ?? context.balanceSuccessFallbackTimeoutMs ?? BALANCE_SUCCESS_FALLBACK_TIMEOUT_MS,
+          pollMs: this.directCardAdapterOptions.balanceSuccessFallbackPollMs ?? context.balanceSuccessFallbackPollMs ?? BALANCE_SUCCESS_FALLBACK_POLL_MS,
+        });
+      }
+      lifecycleAfterAction = directResult?.status === "success" || directResult?.ok === true ? "freeze_success" : "freeze_failure";
+      if (lifecycleContext) lifecycleContext.directResult = directResult;
     } finally {
       if (directStarted) {
         try {
