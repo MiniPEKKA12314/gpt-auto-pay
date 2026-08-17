@@ -156,7 +156,6 @@ CREATE TABLE IF NOT EXISTS cards (
 
 CREATE INDEX IF NOT EXISTS idx_cards_group_status ON cards(card_group_id, status);
 CREATE INDEX IF NOT EXISTS idx_cards_priority ON cards(priority, last_used_at);
-CREATE INDEX IF NOT EXISTS idx_cards_lease ON cards(lease_order_id, lease_at);
 
 CREATE TABLE IF NOT EXISTS billing_groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,8 +194,6 @@ CREATE TABLE IF NOT EXISTS billing_addresses (
   delete_reason TEXT DEFAULT '',
   FOREIGN KEY(billing_group_id) REFERENCES billing_groups(id)
 );
-
-CREATE INDEX IF NOT EXISTS idx_billing_addresses_lease ON billing_addresses(lease_order_id, lease_at);
 
 CREATE TABLE IF NOT EXISTS proxy_groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
