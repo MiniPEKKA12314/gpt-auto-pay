@@ -78,8 +78,12 @@ function ensurePlatformMigrations(db) {
   ensureColumn(db, "order_attempts", "provider_task_id", "TEXT DEFAULT ''");
   ensureColumn(db, "order_attempts", "provider_batch_no", "TEXT DEFAULT ''");
   ensureColumn(db, "order_attempts", "provider_card_id", "TEXT DEFAULT ''");
+  ensureColumn(db, "order_attempts", "provider_cleanup_status", "TEXT DEFAULT ''");
+  ensureColumn(db, "order_attempts", "provider_cleanup_at", "REAL DEFAULT 0");
+  ensureColumn(db, "order_attempts", "provider_cleanup_error", "TEXT DEFAULT ''");
   db.exec("CREATE INDEX IF NOT EXISTS idx_cards_lease ON cards(lease_order_id, lease_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_billing_addresses_lease ON billing_addresses(lease_order_id, lease_at)");
+  sanitizeStoredRunLogMetadata(db);
 }
 
 function ensureDefaultAdmin(db, now = nowSeconds()) {
@@ -254,11 +258,58 @@ function orderSuffix(now = nowSeconds()) {
   return `${Math.floor(now * 1000)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+const SENSITIVE_LOG_KEY = /(?:password|pass(?:word)?|secret|token|authorization|cookie|api[_-]?key|proxy(?:_?url)?|encrypted)/i;
+const PROXY_CREDENTIAL_URL = /((?:https?|socks5?):\/\/)([^\s:@/]+):([^\s@/]+)@/gi;
+
+function redactLogText(value) {
+  return String(value ?? "").replace(PROXY_CREDENTIAL_URL, "$1<user>:<pass>@");
+}
+
+function sanitizeRunLogMeta(value, key = "", seen = new WeakSet()) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") {
+    if (SENSITIVE_LOG_KEY.test(key)) {
+      if (/proxy/i.test(key)) return redactLogText(value);
+      return value ? "<redacted>" : "";
+    }
+    return redactLogText(value);
+  }
+  if (typeof value !== "object") return value;
+  if (seen.has(value)) return "<circular>";
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((item) => sanitizeRunLogMeta(item, key, seen));
+  return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+    childKey,
+    sanitizeRunLogMeta(childValue, childKey, seen),
+  ]));
+}
+
+function sanitizeStoredRunLogMetadata(db) {
+  const rows = db.prepare("SELECT id, meta_json FROM run_logs").all();
+  const update = db.prepare("UPDATE run_logs SET meta_json = ? WHERE id = ?");
+  for (const row of rows) {
+    try {
+      const original = JSON.parse(row.meta_json || "{}");
+      const sanitized = JSON.stringify(sanitizeRunLogMeta(original));
+      if (sanitized !== row.meta_json) update.run(sanitized, row.id);
+    } catch {
+      update.run("{}", row.id);
+    }
+  }
+}
+
 export class PlatformStore {
   constructor(db, options = {}) {
     this.db = db;
     this.codePepper = String(options.codePepper ?? "");
-    this.secretKey = String(options.secretKey ?? process.env.APP_SECRET_KEY ?? "local-development-secret");
+    const configuredSecretKey = String(options.secretKey ?? process.env.APP_SECRET_KEY ?? "");
+    const databaseFile = this.db.prepare("PRAGMA database_list").all().find((row) => row.name === "main")?.file ?? "";
+    const inMemoryDatabase = !databaseFile || databaseFile === ":memory:";
+    const runningTests = process.argv.includes("--test") || process.env.NODE_ENV === "test" || inMemoryDatabase;
+    if (!configuredSecretKey && !runningTests && options.allowInsecureDevSecret !== true) {
+      throw new PlatformStoreError("APP_SECRET_KEY_REQUIRED", "APP_SECRET_KEY must be configured outside tests");
+    }
+    this.secretKey = configuredSecretKey || "local-development-secret";
     if (options.ensureDefaultAdmin !== false) ensureDefaultAdmin(this.db);
     const adminPassword = options.adminPassword ?? process.env.PLATFORM_ADMIN_PASSWORD ?? "";
     if (adminPassword) {
@@ -1294,6 +1345,11 @@ export class PlatformStore {
   }
 
   disableRedeemCode(codeId, adminId = 1, now = nowSeconds()) {
+    const current = this.getRedeemCodeById(codeId);
+    const activeOrder = current.locked_order_id ? this.getOrderById(current.locked_order_id) : null;
+    if (activeOrder && [OrderStatus.QUEUED, OrderStatus.RUNNING].includes(activeOrder.status)) {
+      throw new PlatformStoreError("REDEEM_CODE_ACTIVE_ORDER", "运行中的兑换码不能禁用");
+    }
     this.db.prepare(`
       UPDATE redeem_codes
          SET status = ?, disabled_at = ?, disabled_by = ?
@@ -1303,6 +1359,11 @@ export class PlatformStore {
   }
 
   softDeleteRedeemCode(codeId, adminId = 1, reason = "", now = nowSeconds()) {
+    const current = this.getRedeemCodeById(codeId);
+    const activeOrder = current.locked_order_id ? this.getOrderById(current.locked_order_id) : null;
+    if (activeOrder && [OrderStatus.QUEUED, OrderStatus.RUNNING].includes(activeOrder.status)) {
+      throw new PlatformStoreError("REDEEM_CODE_ACTIVE_ORDER", "运行中的兑换码不能删除");
+    }
     this.db.prepare(`
       UPDATE redeem_codes
          SET deleted_at = ?, deleted_by = ?, delete_reason = ?
@@ -1351,7 +1412,7 @@ export class PlatformStore {
       }
       const plan = this.getPlanConfig(code.plan_type);
       const lockRedeemCodeOnFailure = boolInt(plan.lock_redeem_code_on_failure);
-      const orderNo = String(input.order_no ?? input.orderNo ?? `ord_${Math.floor(now * 1000)}`);
+      const orderNo = String(input.order_no ?? input.orderNo ?? `ord_${createSessionId()}`);
       const orderResult = this.db.prepare(`
         INSERT INTO orders(
           order_no, redeem_code_id, plan_type, status,
@@ -1375,6 +1436,9 @@ export class PlatformStore {
            SET status = ?, locked_order_id = ?, locked_at = ?
          WHERE id = ? AND status = ?
       `).run(RedeemStatus.LOCKED, orderId, now, code.id, RedeemStatus.UNUSED);
+      if (input.runtime && typeof input.runtime === "object") {
+        this._writeOrderRuntimeSecrets(orderId, input.runtime, now, {});
+      }
       return {
         order: this.getOrderById(orderId),
         redeemCode: this.getRedeemCodeById(code.id),
@@ -1555,6 +1619,11 @@ export class PlatformStore {
   setOrderRuntimeSecrets(orderId, input = {}, now = nowSeconds()) {
     const order = this.getOrderById(orderId);
     const current = this.getOrderRuntimeSecrets(order.id, { includeSecret: true }) ?? {};
+    this._writeOrderRuntimeSecrets(order.id, input, now, current);
+    return this.getOrderRuntimeSecrets(order.id, { includeSecret: true });
+  }
+
+  _writeOrderRuntimeSecrets(orderId, input = {}, now = nowSeconds(), current = {}) {
     const hasAccessToken = input.accessToken !== undefined || input.access_token !== undefined;
     const hasSessionToken = input.sessionToken !== undefined || input.session_token !== undefined;
     const accessToken = hasAccessToken ? String(input.accessToken ?? input.access_token ?? "") : current.accessToken ?? "";
@@ -1579,7 +1648,7 @@ export class PlatformStore {
         checkout_input = excluded.checkout_input,
         updated_at = excluded.updated_at
     `).run(
-      order.id,
+      Number(orderId),
       accessToken ? encryptSecret(accessToken, this.secretKey) : "",
       sessionToken ? encryptSecret(sessionToken, this.secretKey) : "",
       sessionCookieName,
@@ -1587,7 +1656,6 @@ export class PlatformStore {
       now,
       now,
     );
-    return this.getOrderRuntimeSecrets(order.id, { includeSecret: true });
   }
 
   setOrderRuntimeCheckoutInput(orderId, checkoutInput = "", now = nowSeconds()) {
@@ -1690,7 +1758,8 @@ export class PlatformStore {
     this.db.prepare(`
       UPDATE order_attempts
          SET provider_open_submitted = ?, provider_request_no = ?, provider_task_id = ?,
-             provider_batch_no = ?, provider_card_id = ?
+             provider_batch_no = ?, provider_card_id = ?,
+             provider_cleanup_status = ?, provider_cleanup_at = ?, provider_cleanup_error = ?
        WHERE id = ?
     `).run(
       boolInt(input.provider_open_submitted ?? input.providerOpenSubmitted ?? current.provider_open_submitted),
@@ -1698,8 +1767,23 @@ export class PlatformStore {
       String(input.provider_task_id ?? input.providerTaskId ?? current.provider_task_id ?? ""),
       String(input.provider_batch_no ?? input.providerBatchNo ?? current.provider_batch_no ?? ""),
       String(input.provider_card_id ?? input.providerCardId ?? current.provider_card_id ?? ""),
+      String(input.provider_cleanup_status ?? input.providerCleanupStatus ?? current.provider_cleanup_status ?? ""),
+      Number(input.provider_cleanup_at ?? input.providerCleanupAt ?? current.provider_cleanup_at ?? 0),
+      String(input.provider_cleanup_error ?? input.providerCleanupError ?? current.provider_cleanup_error ?? ""),
       Number(attemptId),
     );
+    return getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
+  }
+
+  updateOrderAttemptProviderCleanup(attemptId, input = {}, now = nowSeconds()) {
+    const current = getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
+    const status = String(input.status ?? input.provider_cleanup_status ?? input.providerCleanupStatus ?? current.provider_cleanup_status ?? "");
+    const error = String(input.error ?? input.provider_cleanup_error ?? input.providerCleanupError ?? current.provider_cleanup_error ?? "").slice(0, 2000);
+    this.db.prepare(`
+      UPDATE order_attempts
+         SET provider_cleanup_status = ?, provider_cleanup_at = ?, provider_cleanup_error = ?
+       WHERE id = ?
+    `).run(status, Number(input.at ?? input.provider_cleanup_at ?? now), error, Number(attemptId));
     return getRequired(this.db, "SELECT * FROM order_attempts WHERE id = ?", Number(attemptId));
   }
 
@@ -1736,12 +1820,12 @@ export class PlatformStore {
       FROM order_attempts oa
       JOIN orders o ON o.id = oa.order_id
       WHERE oa.provider_open_submitted = 1
-        AND oa.provider_card_id = ''
         AND oa.provider_request_no <> ''
-        AND o.status IN (?, ?)
+        AND COALESCE(oa.provider_cleanup_status, '') <> 'completed'
+        AND o.status IN (?, ?, ?)
         AND o.deleted_at = 0
       ORDER BY oa.id ASC
-    `).all(OrderStatus.FAILED, OrderStatus.INTERRUPTED_REVIEW);
+    `).all(OrderStatus.FAILED, OrderStatus.INTERRUPTED_REVIEW, OrderStatus.SUCCEEDED);
   }
 
   nextAttemptNo(orderId) {
@@ -1759,7 +1843,7 @@ export class PlatformStore {
       String(input.level ?? "info"),
       String(input.stage ?? ""),
       String(input.message ?? ""),
-      JSON.stringify(input.meta ?? input.meta_json ?? {}),
+      JSON.stringify(sanitizeRunLogMeta(input.meta ?? input.meta_json ?? {})),
       now,
     );
     return Number(result.lastInsertRowid);
@@ -2205,6 +2289,9 @@ export class PlatformStore {
       if (order.status === OrderStatus.SUCCEEDED) {
         throw new PlatformStoreError("ORDER_ALREADY_SUCCEEDED", "Payment has already been confirmed; the order cannot be requeued");
       }
+      if (![OrderStatus.FAILED, OrderStatus.INTERRUPTED_REVIEW].includes(order.status)) {
+        throw new PlatformStoreError("ORDER_NOT_TERMINAL", "只有失败或待核对订单可以重新排队");
+      }
       const codeUpdate = this.db.prepare(`
         UPDATE redeem_codes
            SET status = ?, locked_order_id = ?, locked_at = ?,
@@ -2236,10 +2323,39 @@ export class PlatformStore {
   }
 
   terminateOrder(orderId, reason = "terminated_by_admin", now = nowSeconds()) {
+    const order = this.getOrderById(orderId);
+    if (order.status === OrderStatus.RUNNING) {
+      return this.interruptRunningOrder(orderId, reason, now);
+    }
     return this.markOrderFailedAndReleaseCode(orderId, {
       public_message: "",
       admin_error: reason,
     }, now);
+  }
+
+  interruptRunningOrder(orderId, reason = "terminated_by_admin", now = nowSeconds()) {
+    return runTransaction(this.db, () => {
+      const order = this.getOrderById(orderId);
+      if (order.status !== OrderStatus.RUNNING) {
+        throw new PlatformStoreError("ORDER_NOT_RUNNING", "订单当前不在运行中");
+      }
+      const codeUpdate = this.db.prepare(`
+        UPDATE redeem_codes
+           SET status = ?, locked_order_id = ?, unavailable_at = ?, unavailable_reason = ?
+         WHERE id = ? AND used_order_id = 0 AND locked_order_id = ?
+      `).run(RedeemStatus.UNAVAILABLE, order.id, now, String(reason), order.redeem_code_id, order.id);
+      if (Number(codeUpdate.changes) !== 1) {
+        throw new PlatformStoreError("REDEEM_CODE_OWNERSHIP_CONFLICT", "运行中订单无法安全锁定兑换码");
+      }
+      this.db.prepare(`
+        UPDATE orders
+           SET status = ?, admin_error = ?, finished_at = CASE WHEN finished_at = 0 THEN ? ELSE finished_at END,
+               updated_at = ?
+         WHERE id = ? AND status = ?
+      `).run(OrderStatus.INTERRUPTED_REVIEW, String(reason), now, now, order.id, OrderStatus.RUNNING);
+      this.releaseOrderResourceLeases(order.id, now);
+      return { order: this.getOrderById(order.id), redeemCode: this.getRedeemCodeById(order.redeem_code_id) };
+    });
   }
 
   resolveInterruptedOrder(orderId, action, now = nowSeconds()) {
@@ -2321,11 +2437,10 @@ export class PlatformStore {
                unavailable_at = 0, unavailable_reason = ''
          WHERE id = ?
            AND (
-             locked_order_id = ?
+             (locked_order_id = ? AND status IN (?, ?))
              OR used_order_id = ?
-             OR (locked_order_id = 0 AND used_order_id = 0 AND status = ?)
            )
-      `).run(RedeemStatus.USED, order.id, now, order.redeem_code_id, order.id, order.id, RedeemStatus.UNUSED);
+      `).run(RedeemStatus.USED, order.id, now, order.redeem_code_id, order.id, RedeemStatus.LOCKED, RedeemStatus.UNAVAILABLE, order.id);
       if (Number(codeUpdate.changes) !== 1) {
         throw new PlatformStoreError(
           "REDEEM_CODE_OWNERSHIP_CONFLICT",
@@ -2369,7 +2484,7 @@ export class PlatformStore {
          WHERE id = ?
            AND used_order_id = 0
            AND (
-             locked_order_id = ?
+             (locked_order_id = ? AND status IN (?, ?))
              OR (locked_order_id = 0 AND status = ?)
            )
       `).run(
@@ -2384,6 +2499,8 @@ export class PlatformStore {
         lockCode ? unavailableReason : "",
         order.redeem_code_id,
         order.id,
+        RedeemStatus.LOCKED,
+        RedeemStatus.UNAVAILABLE,
         RedeemStatus.UNUSED,
       );
       if (Number(codeUpdate.changes) !== 1) {

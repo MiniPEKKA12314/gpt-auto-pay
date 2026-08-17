@@ -56,6 +56,15 @@ function failureCodeFields(plan = {}) {
   };
 }
 
+function executionWasCancelled(store, orderId, signal) {
+  if (signal?.aborted) return true;
+  try {
+    return store.getOrderById(orderId).status !== "running";
+  } catch {
+    return Boolean(signal?.aborted);
+  }
+}
+
 async function failOrder(store, orderId, attemptId, message, stage = "runner", now, plan = {}) {
   store.updateOrderAttempt(attemptId, {
     status: "failed",
@@ -115,6 +124,61 @@ function clearKimooxPerOrderRetryRuntime(retryRuntime = {}) {
   delete retryRuntime.kimooxPerOrderCleanup;
 }
 
+function collectKimooxCardIds(value, result = new Set(), seen = new WeakSet()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return result;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) collectKimooxCardIds(item, result, seen);
+    return result;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (/card(?:Id|_id)|userBankId|bankCardId/i.test(key) && (typeof child === "string" || typeof child === "number")) {
+      const text = String(child).trim();
+      if (text) result.add(text);
+    }
+    collectKimooxCardIds(child, result, seen);
+  }
+  return result;
+}
+
+async function resolveKimooxRemoteCard(provider, order, retryRuntime = {}) {
+  const providerCardId = String(retryRuntime.kimooxProviderCardId ?? retryRuntime.kimoox_provider_card_id ?? "").trim();
+  const requestNo = String(retryRuntime.kimooxRequestNo ?? retryRuntime.kimoox_request_no ?? "").trim();
+  const taskId = String(retryRuntime.kimooxApplyTaskId ?? retryRuntime.kimoox_apply_task_id ?? "").trim();
+  const batchNo = String(retryRuntime.kimooxApplyBatchNo ?? retryRuntime.kimoox_apply_batch_no ?? "").trim();
+  const candidates = [];
+  if (providerCardId) candidates.push({ cardId: providerCardId });
+  if (!providerCardId && (taskId || batchNo || requestNo)) {
+    const detail = await provider.getOpenCardDetail({ taskId, batchNo, requestNo });
+    for (const id of collectKimooxCardIds(detail)) candidates.push({ cardId: id });
+  }
+  if (batchNo) candidates.push({ batchNo });
+  if (order?.order_no) candidates.push({ remark: `order ${order.order_no}`.slice(0, 40) });
+  if (requestNo) candidates.push({ remark: requestNo });
+  const seen = new Set();
+  for (const input of candidates) {
+    const key = JSON.stringify(input);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const rows = await provider.listCards({ ...input, pageNum: 1, pageSize: 20 });
+    const remote = Array.isArray(rows)
+      ? rows.find((row) => String(row.provider_card_id ?? row.providerCardId ?? "").trim())
+      : null;
+    if (remote) return remote;
+  }
+  return null;
+}
+
+function recordKimooxCleanup(store, attemptId, cleanup, now) {
+  if (!attemptId || typeof store.updateOrderAttemptProviderCleanup !== "function" || !cleanup) return;
+  const completed = (cleanup.ok === true || cleanup.skipped === true) && cleanup.pending !== true;
+  store.updateOrderAttemptProviderCleanup(attemptId, {
+    status: completed ? "completed" : "pending",
+    error: completed ? "" : (cleanup.errors || []).join("; "),
+    at: now(),
+  }, now());
+}
+
 
 async function cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime = {}, options = {}, attemptId = 0, now = () => Date.now() / 1000, directResult = null) {
   const source = planCardSource(plan);
@@ -129,8 +193,7 @@ async function cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime = {},
     if (!requestNo) return { ok: false, pending: true, errors: ["Kimoox 开卡请求已提交但缺少 requestNo，无法定位远端卡"] };
     try {
       const provider = createCardLifecycleProvider(store, options)("kimoox");
-      const rows = await provider.listCards({ remark: requestNo, pageNum: 1, pageSize: 20 });
-      const remote = Array.isArray(rows) ? rows.find((row) => String(row.provider_card_id || "").trim()) : null;
+      const remote = await resolveKimooxRemoteCard(provider, order, retryRuntime);
       if (!remote) {
         const pending = { ok: false, pending: true, request_no: requestNo, errors: ["Kimoox 开卡请求已提交，但当前尚未查询到对应远端卡；已保留请求信息等待后续核对"] };
         store.addRunLog({ order_id: order.id, attempt_id: attemptId, level: "error", stage: "kimoox_cleanup", message: pending.errors[0], meta: pending }, now());
@@ -215,8 +278,12 @@ export async function reconcileKimooxOrphanOperation(store, attempt, options = {
   const retryRuntime = {
     kimooxOpenSubmitted: true,
     kimooxRequestNo: attempt.provider_request_no,
+    kimooxApplyTaskId: attempt.provider_task_id,
+    kimooxApplyBatchNo: attempt.provider_batch_no,
+    kimooxProviderCardId: attempt.provider_card_id,
+    kimooxPerOrderCardId: attempt.card_id,
   };
-  return cleanupPerOrderRuntimeCard(
+  const cleanup = await cleanupPerOrderRuntimeCard(
     store,
     order,
     plan,
@@ -224,13 +291,17 @@ export async function reconcileKimooxOrphanOperation(store, attempt, options = {
     options,
     attempt.id,
     options.now ?? (() => Date.now() / 1000),
-    null,
+    order.status === "succeeded" ? { ok: true, status: "success" } : null,
   );
+  recordKimooxCleanup(store, attempt.id, cleanup, options.now ?? (() => Date.now() / 1000));
+  return cleanup;
 }
 
 async function safeCleanupAfterSuccess(store, order, plan, retryRuntime, options, attemptId, now, runnerResult) {
   try {
-    return await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
+    const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
+    recordKimooxCleanup(store, attemptId, cleanup, now);
+    return cleanup;
   } catch (error) {
     const cleanup = { ok: false, errors: [error.message || String(error)] };
     store.addRunLog({
@@ -385,6 +456,7 @@ export async function runPlatformOrder(store, orderId, adapter, options = {}) {
   }
 
   const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
+  recordKimooxCleanup(store, attemptId, cleanup, now);
   runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
   const message = runnerResult?.message || runnerResult?.error || "runner failed";
   const failed = await failOrder(store, order.id, attemptId, message, "runner", now(), plan);
@@ -601,6 +673,34 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
       });
     }
 
+    if (executionWasCancelled(store, order.id, options.signal)) {
+      store.updateOrderAttempt(attemptId, {
+        status: "cancelled",
+        stage: "interrupted",
+        error_code: "ORDER_EXECUTION_CANCELLED",
+        error_message: "订单已被管理员终止，未再修改订单最终状态",
+      }, now());
+      store.addRunLog({
+        order_id: order.id,
+        attempt_id: attemptId,
+        level: "error",
+        stage: "interrupted",
+        message: "订单执行已中断；订单保持待核对状态，兑换码不会自动返还",
+        meta: { cancelled: true, signal_aborted: Boolean(options.signal?.aborted) },
+      }, now());
+      return {
+        ok: false,
+        cancelled: true,
+        result: resultFailed("订单执行已被终止，等待管理员核对", { code: "ORDER_EXECUTION_CANCELLED" }),
+        order: store.getOrderById(order.id),
+        redeemCode: store.getRedeemCodeById(order.redeem_code_id),
+        card,
+        billingAddress,
+        attempt: store.listOrderAttempts(order.id).find((row) => Number(row.id) === Number(attemptId)) ?? null,
+        attempts: previousResults,
+      };
+    }
+
     if (isSuccessResult(runnerResult)) {
       const result = store.markOrderSucceeded(order.id, now());
       store.updateOrderAttempt(attemptId, {
@@ -694,6 +794,7 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
             now,
             runnerResult,
           );
+          recordKimooxCleanup(store, attemptId, previousCardCleanup, now);
         } catch (error) {
           previousCardCleanup = { ok: false, errors: [error.message || String(error)] };
           store.addRunLog({
@@ -706,6 +807,25 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
           }, now());
         }
         previousResults[previousResults.length - 1].previous_card_cleanup = previousCardCleanup;
+        if (previousCardCleanup && (previousCardCleanup.ok === false || previousCardCleanup.pending === true)) {
+          store.updateOrderAttempt(attemptId, {
+            status: "failed",
+            stage: "kimoox_cleanup",
+            error_code: "KIMOOX_CLEANUP_PENDING",
+            error_message: (previousCardCleanup.errors || ["Kimoox card cleanup is not confirmed"]).join("; "),
+          }, now());
+          const held = store.interruptRunningOrder(order.id, "Kimoox 临时卡收尾未确认，订单进入待核对状态", now());
+          return {
+            ok: false,
+            held_for_review: true,
+            result: mergeCleanupIntoResult(runnerResult, previousCardCleanup),
+            order: held.order,
+            redeemCode: held.redeemCode,
+            card,
+            billingAddress,
+            attempts: previousResults,
+          };
+        }
         clearKimooxPerOrderRetryRuntime(retryRuntime);
       }
       store.addRunLog({
@@ -725,7 +845,27 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     }
 
     const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
+    recordKimooxCleanup(store, attemptId, cleanup, now);
     runnerResult = mergeCleanupIntoResult(runnerResult, cleanup);
+    if (cleanup && (cleanup.ok === false || cleanup.pending === true) && planCardSource(plan) === "kimoox") {
+      store.updateOrderAttempt(attemptId, {
+        status: "failed",
+        stage: "kimoox_cleanup",
+        error_code: "KIMOOX_CLEANUP_PENDING",
+        error_message: (cleanup.errors || ["Kimoox card cleanup is not confirmed"]).join("; "),
+      }, now());
+      const held = store.interruptRunningOrder(order.id, "Kimoox 临时卡收尾未确认，订单进入待核对状态", now());
+      return {
+        ok: false,
+        held_for_review: true,
+        result: runnerResult,
+        order: held.order,
+        redeemCode: held.redeemCode,
+        card,
+        billingAddress,
+        attempts: previousResults,
+      };
+    }
     const cleanupSuffix = cleanup?.ok === false ? `?Kimoox ???????: ${(cleanup.errors || []).join("; ")}` : "";
     const failed = store.markOrderFailedAndReleaseCode(order.id, {
       admin_error: message + cleanupSuffix,
@@ -760,6 +900,26 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     error_message: message,
   }, now());
   const cleanup = await cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime, options, attemptId, now, runnerResult);
+  recordKimooxCleanup(store, attemptId, cleanup, now);
+  if (cleanup && (cleanup.ok === false || cleanup.pending === true) && planCardSource(plan) === "kimoox") {
+    store.updateOrderAttempt(attemptId, {
+      status: "failed",
+      stage: "kimoox_cleanup",
+      error_code: "KIMOOX_CLEANUP_PENDING",
+      error_message: (cleanup.errors || ["Kimoox card cleanup is not confirmed"]).join("; "),
+    }, now());
+    const held = store.interruptRunningOrder(order.id, "Kimoox 临时卡收尾未确认，订单进入待核对状态", now());
+    return {
+      ok: false,
+      held_for_review: true,
+      result: resultFailed(message, { code: "KIMOOX_CLEANUP_PENDING", cleanup }),
+      order: held.order,
+      redeemCode: held.redeemCode,
+      card,
+      billingAddress,
+      attempts: previousResults,
+    };
+  }
   const failed = await failOrder(store, order.id, attemptId, message + (cleanup?.ok === false ? `；远程临时卡收尾失败: ${(cleanup.errors || []).join("; ")}` : ""), "retry_guard", now(), plan);
   return {
     ok: false,

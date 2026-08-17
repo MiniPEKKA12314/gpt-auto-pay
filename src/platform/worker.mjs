@@ -1,8 +1,70 @@
 import { nowSeconds } from "./constants.mjs";
 import { reconcileKimooxOrphanOperation, runPlatformOrderWithRetry } from "./runner_adapter.mjs";
+import { spawn } from "node:child_process";
 
 function defaultNow() {
   return nowSeconds();
+}
+
+export class OrderExecutionRegistry {
+  constructor() {
+    this.active = new Map();
+  }
+
+  begin(orderId) {
+    const controller = new AbortController();
+    const children = new Set();
+    const execution = {
+      orderId: Number(orderId),
+      controller,
+      signal: controller.signal,
+      registerChildProcess: (child) => {
+        if (!child || typeof child.once !== "function") return null;
+        children.add(child);
+        const remove = () => children.delete(child);
+        child.once("exit", remove);
+        child.once("error", remove);
+        return child;
+      },
+      abort: (reason = "terminated_by_admin") => {
+        if (!controller.signal.aborted) controller.abort(reason);
+        for (const child of children) {
+          try {
+            if (process.platform === "win32" && child.pid) {
+              const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+              killer.unref?.();
+            } else if (child.pid) {
+              process.kill(-child.pid, "SIGTERM");
+            } else {
+              child.kill?.("SIGTERM");
+            }
+          } catch {
+            try { child.kill?.("SIGTERM"); } catch { }
+          }
+        }
+      },
+    };
+    this.active.set(Number(orderId), execution);
+    return execution;
+  }
+
+  get(orderId) {
+    return this.active.get(Number(orderId)) ?? null;
+  }
+
+  abort(orderId, reason = "terminated_by_admin") {
+    const execution = this.get(orderId);
+    execution?.abort(reason);
+    return Boolean(execution);
+  }
+
+  end(orderId, execution) {
+    if (this.active.get(Number(orderId)) === execution) this.active.delete(Number(orderId));
+  }
+
+  abortAll(reason = "worker_stopped") {
+    for (const execution of this.active.values()) execution.abort(reason);
+  }
 }
 
 function failingAdapter(error) {
@@ -65,6 +127,7 @@ export async function runQueueOnce(store, adapterFactory, options = {}) {
   const now = options.now ?? defaultNow;
   const started = store.dispatchQueuedOrders(now(), { ignorePaused: options.ignorePaused === true });
   const results = await Promise.all(started.map(async (order) => {
+    const execution = options.executionRegistry?.begin(order.id);
     try {
       const result = await runPlatformOrderWithRetry(store, order.id, async (context) => {
         try {
@@ -77,14 +140,16 @@ export async function runQueueOnce(store, adapterFactory, options = {}) {
             attemptNo: context.attemptNo,
             attemptId: context.attemptId,
             retry: context.retry,
-            signal: options.signal,
+            signal: context.signal,
+            registerChildProcess: context.registerChildProcess,
           });
         } catch (error) {
           return failingAdapter(error);
         }
       }, {
         now,
-        signal: options.signal,
+        signal: execution?.signal ?? options.signal,
+        registerChildProcess: execution?.registerChildProcess,
         fetchImpl: options.fetchImpl,
         cardProviderFactory: options.cardProviderFactory,
       });
@@ -104,7 +169,7 @@ export async function runQueueOnce(store, adapterFactory, options = {}) {
         meta: { code: error.code || "QUEUE_ORDER_EXCEPTION" },
       }, now());
       let failedOrder = store.getOrderById(order.id);
-      if (failedOrder.status !== "succeeded") {
+      if (!["succeeded", "interrupted_review"].includes(failedOrder.status)) {
         try {
           failedOrder = store.markOrderFailedAndReleaseCode(order.id, {
             admin_error: error.message || String(error),
@@ -120,6 +185,8 @@ export async function runQueueOnce(store, adapterFactory, options = {}) {
         ok: false,
         result: { ok: false, order: failedOrder, error: error.message || String(error) },
       };
+    } finally {
+      options.executionRegistry?.end(order.id, execution);
     }
   }));
 
@@ -150,6 +217,7 @@ export class PlatformQueueWorker {
     this.signal = options.signal;
     this.fetchImpl = options.fetchImpl;
     this.cardProviderFactory = options.cardProviderFactory;
+    this.executionRegistry = options.executionRegistry ?? new OrderExecutionRegistry();
     this.logger = typeof options.logger === "function" ? options.logger : () => {};
     this.timer = null;
     this.running = false;
@@ -180,6 +248,7 @@ export class PlatformQueueWorker {
 
   stop() {
     if (this.timer) clearInterval(this.timer);
+    this.executionRegistry.abortAll("worker_stopped");
     this.timer = null;
     this.started = false;
     return this;
@@ -194,6 +263,7 @@ export class PlatformQueueWorker {
         signal: this.signal,
         fetchImpl: this.fetchImpl,
         cardProviderFactory: this.cardProviderFactory,
+        executionRegistry: this.executionRegistry,
       });
       if (result.started.length > 0 || result.results.length > 0) {
         this.logger({ type: "tick", ...result });

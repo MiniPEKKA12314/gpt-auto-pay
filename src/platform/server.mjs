@@ -18,7 +18,7 @@ import { renderPublicUi } from "./public_ui.mjs";
 import { normalizeRedeemCode } from "./redeem.mjs";
 import { MemoryRateLimiter } from "./rate_limit.mjs";
 import { checkPlanRuntimeReadiness } from "./runtime_readiness.mjs";
-import { PlatformQueueWorker, runQueueOnce } from "./worker.mjs";
+import { OrderExecutionRegistry, PlatformQueueWorker, runQueueOnce } from "./worker.mjs";
 
 const JSON_TYPE = "application/json; charset=utf-8";
 
@@ -594,8 +594,8 @@ export function createPlatformRequestHandler(options = {}) {
           code,
           user_ip: ip,
           user_agent: req.headers["user-agent"] || "",
+          runtime: credentials,
         });
-        store.setOrderRuntimeSecrets(order.id, credentials);
         sendJson(res, 200, { ok: true, data: publicOrderSummary(order, store.getPlanConfig(order.plan_type, { includeCardGroups: false })) });
         return;
       }
@@ -775,6 +775,7 @@ export function createPlatformRequestHandler(options = {}) {
         const result = await runQueueOnce(store, queueAdapterFactory, {
           fetchImpl,
           cardProviderFactory: options.cardProviderFactory,
+          executionRegistry: options.executionRegistry,
         });
         adminAudit(store, req, {
           action: "queue_dispatch",
@@ -792,6 +793,7 @@ export function createPlatformRequestHandler(options = {}) {
           ignorePaused: true,
           fetchImpl,
           cardProviderFactory: options.cardProviderFactory,
+          executionRegistry: options.executionRegistry,
         });
         adminAudit(store, req, {
           action: "queue_process_once",
@@ -858,7 +860,23 @@ export function createPlatformRequestHandler(options = {}) {
         const body = await readJson(req);
         let after;
         if (action === "requeue") after = store.requeueOrder(orderId);
-        else if (action === "terminate") after = store.terminateOrder(orderId, body.reason ?? "terminated_by_admin");
+        else if (action === "terminate") {
+          const reason = body.reason ?? "terminated_by_admin";
+          if (before.status === OrderStatus.RUNNING) {
+            store.pauseQueue(1);
+            after = store.interruptRunningOrder(orderId, reason);
+            options.executionRegistry?.abort(orderId, reason);
+            store.addRunLog({
+              order_id: orderId,
+              level: "error",
+              stage: "queue_worker",
+              message: `订单已终止，队列已暂停；当前执行已中断并进入待核对状态: ${reason}`,
+              meta: { reason, execution_aborted: true },
+            });
+          } else {
+            after = store.terminateOrder(orderId, reason);
+          }
+        }
         else if (action === "delete") after = store.softDeleteOrder(orderId, 1, body.reason ?? "deleted_by_admin");
         else after = store.resolveInterruptedOrder(orderId, body.action);
         adminAudit(store, req, {
@@ -1938,6 +1956,7 @@ export function createPlatformRequestHandler(options = {}) {
 
 export function listenPlatformServer(options = {}) {
   const store = options.store;
+  const executionRegistry = options.executionRegistry ?? new OrderExecutionRegistry();
   const queueAdapterFactory = options.queueAdapterFactory ?? (store ? createPlatformPaymentAdapterFactory({ store, fetchImpl: options.fetchImpl, cardProviderFactory: options.cardProviderFactory }) : undefined);
   let queueWorker = null;
   let lastWorkerEvent = null;
@@ -1951,6 +1970,7 @@ export function listenPlatformServer(options = {}) {
   const server = createServer(createPlatformRequestHandler({
     ...options,
     queueAdapterFactory,
+    executionRegistry,
     workerStatusProvider,
   }));
   const host = options.host ?? "127.0.0.1";
@@ -1966,6 +1986,7 @@ export function listenPlatformServer(options = {}) {
           recoverRunningOnStart: options.recoverRunningOnStart === true,
           fetchImpl: options.fetchImpl,
           cardProviderFactory: options.cardProviderFactory,
+          executionRegistry,
           logger: (event) => {
             lastWorkerEvent = summarizeWorkerEvent(event);
             if (typeof options.queueWorkerLogger === "function") options.queueWorkerLogger(event);

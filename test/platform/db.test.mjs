@@ -342,8 +342,8 @@ test("store controls queue settings, dispatch, termination, and interrupted reso
   assert.equal(store.queueSnapshot().queued, 1);
 
   const terminated = store.terminateOrder(first.order.id, "admin stop", 99);
-  assert.equal(terminated.order.status, "failed");
-  assert.equal(terminated.redeemCode.status, "unused");
+  assert.equal(terminated.order.status, "interrupted_review");
+  assert.equal(terminated.redeemCode.status, "unavailable");
 
   store.recoverRunningOrders("boot", 100);
   assert.equal(store.getOrderById(second.order.id).status, "interrupted_review");

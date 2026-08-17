@@ -248,7 +248,7 @@ export class DirectCardRunnerAdapter extends RunnerAdapter {
       }),
       proxyUrl,
       proxyChain,
-      registerChildProcess: this.options.registerChildProcess,
+      registerChildProcess: context.registerChildProcess ?? this.options.registerChildProcess,
       postClickTimeoutMs: this.options.postClickTimeoutMs ?? 60_000,
       postClickPollMs: this.options.postClickPollMs ?? 500,
       accountVerificationTimeoutMs: this.options.accountVerificationTimeoutMs ?? 75_000,
