@@ -572,3 +572,41 @@ test("remote balance decrease fallback marks an unresolved payment as successful
     store.close();
   }
 });
+
+test("a post-payment remote-card freeze failure does not downgrade a confirmed payment", async () => {
+  const { store, cardId, orderId } = createProcessorStore();
+  try {
+    store.setCardProviderConfig("vcc", { user_serial: "user-1", secret_key: "secret" }, 90);
+    store.updateCard(cardId, {
+      provider: "vcc",
+      provider_card_id: "remote-freeze-1",
+      auto_freeze_after_success: true,
+    }, 91);
+    const factory = createPlatformPaymentAdapterFactory({
+      checkoutAdapterFactory: () => ({
+        async execute() {
+          return { ok: true, status: "success", checkoutInput: "oaics_freeze", checkout_input: "oaics_freeze" };
+        },
+      }),
+      directCardAdapterFactory: () => ({
+        async execute() {
+          return { ok: true, status: "success", message: "subscription confirmed" };
+        },
+      }),
+    });
+    const cardProviderFactory = () => ({
+      async suspendCard() {
+        throw new Error("provider freeze timeout");
+      },
+    });
+
+    const result = await runPlatformOrderWithRetry(store, orderId, factory, { now: () => 600, cardProviderFactory });
+    assert.equal(result.ok, true);
+    assert.equal(result.order.status, "succeeded");
+    assert.equal(result.redeemCode.status, "used");
+    assert.equal(result.result.post_payment_card_lifecycle.ok, false);
+    assert.match(store.listRunLogs(orderId).map((log) => log.message).join("\n"), /provider freeze timeout/);
+  } finally {
+    store.close();
+  }
+});

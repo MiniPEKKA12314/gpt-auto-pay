@@ -368,3 +368,39 @@ test("failed order can keep its redeem code unavailable when the plan enables lo
   assert.equal(failed.redeemCode.status, RedeemStatus.UNAVAILABLE);
   assert.match(failed.redeemCode.unavailable_reason, /锁定兑换码/);
 }));
+
+test("failure locking applies to every failure route and succeeded orders are immutable", () => withStore((store) => {
+  store.upsertPlanConfig({
+    ...store.getPlanConfig("plus"),
+    lock_redeem_code_on_failure: true,
+  }, 120);
+  store.createRedeemBatchWithCodes({
+    name: "terminal order batch",
+    plan_type: "plus",
+    quantity: 2,
+    codeFactory: (index) => `PLUS-TERMINAL-${index}`,
+  }, 121);
+
+  const failedOrder = store.lockCodeAndCreateOrder({ code: "PLUS-TERMINAL-0", order_no: "ord_terminal_failed" }, 122);
+  assert.equal(failedOrder.order.lock_redeem_code_on_failure, 1);
+  store.upsertPlanConfig({
+    ...store.getPlanConfig("plus"),
+    lock_redeem_code_on_failure: false,
+  }, 122.5);
+  const terminated = store.terminateOrder(failedOrder.order.id, "admin stop", 123);
+  assert.equal(terminated.order.status, OrderStatus.FAILED);
+  assert.equal(terminated.redeemCode.status, RedeemStatus.UNAVAILABLE);
+
+  const successfulOrder = store.lockCodeAndCreateOrder({ code: "PLUS-TERMINAL-1", order_no: "ord_terminal_success" }, 124);
+  const succeeded = store.markOrderSucceeded(successfulOrder.order.id, 125);
+  assert.equal(succeeded.order.status, OrderStatus.SUCCEEDED);
+  assert.equal(succeeded.redeemCode.status, RedeemStatus.USED);
+  assert.throws(
+    () => store.markOrderFailedAndReleaseCode(successfulOrder.order.id, { admin_error: "late cleanup failure" }, 126),
+    /already been confirmed/,
+  );
+  assert.throws(
+    () => store.requeueOrder(successfulOrder.order.id, 126),
+    /already been confirmed/,
+  );
+}));

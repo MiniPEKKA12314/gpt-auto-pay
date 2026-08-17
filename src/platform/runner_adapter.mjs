@@ -95,6 +95,17 @@ function resultCardId(result = {}) {
   return Number(result?.card?.id ?? result?.kimoox_per_order_card?.local_card_id ?? 0);
 }
 
+function clearKimooxPerOrderRetryRuntime(retryRuntime = {}) {
+  if (!retryRuntime || typeof retryRuntime !== "object") return;
+  delete retryRuntime.kimooxPerOrderCardId;
+  delete retryRuntime.kimoox_per_order_card_id;
+  delete retryRuntime.kimooxProviderCardId;
+  delete retryRuntime.kimoox_provider_card_id;
+  delete retryRuntime.kimooxRequestNo;
+  delete retryRuntime.kimoox_request_no;
+  delete retryRuntime.kimooxPerOrderCleanup;
+}
+
 
 async function cleanupPerOrderRuntimeCard(store, order, plan, retryRuntime = {}, options = {}, attemptId = 0, now = () => Date.now() / 1000, directResult = null) {
   const source = planCardSource(plan);
@@ -545,13 +556,42 @@ export async function runPlatformOrderWithRetry(store, orderId, adapterFactory, 
     }
 
     if (decision.action === "switch_card") {
+      let previousCardCleanup = null;
+      if (planCardSource(plan) === "kimoox") {
+        try {
+          previousCardCleanup = await cleanupPerOrderRuntimeCard(
+            store,
+            order,
+            plan,
+            retryRuntime,
+            options,
+            attemptId,
+            now,
+            runnerResult,
+          );
+        } catch (error) {
+          previousCardCleanup = { ok: false, errors: [error.message || String(error)] };
+          store.addRunLog({
+            order_id: order.id,
+            attempt_id: attemptId,
+            level: "error",
+            stage: "kimoox_cleanup",
+            message: `Kimoox 临时卡切换前收尾异常，已保留异常记录并继续开新卡：${error.message || error}`,
+            meta: previousCardCleanup,
+          }, now());
+        }
+        previousResults[previousResults.length - 1].previous_card_cleanup = previousCardCleanup;
+        clearKimooxPerOrderRetryRuntime(retryRuntime);
+      }
       store.addRunLog({
         order_id: order.id,
         attempt_id: attemptId,
         level: "warn",
         stage: "retry",
-        message: `本次失败，切换下一张卡重试：下一张卡尝试 ${decision.next.card_attempt_index + 1}/${policy.max_card_count}`,
-        meta: decision,
+        message: planCardSource(plan) === "kimoox"
+          ? `本次失败，已按失败策略收尾当前 Kimoox 临时卡并新开下一张卡重试：下一张卡尝试 ${decision.next.card_attempt_index + 1}/${policy.max_card_count}`
+          : `本次失败，切换下一张卡重试：下一张卡尝试 ${decision.next.card_attempt_index + 1}/${policy.max_card_count}`,
+        meta: { ...decision, previous_card_cleanup: previousCardCleanup },
       }, now());
       cardAttemptIndex = decision.next.card_attempt_index;
       proxyAttemptIndex = decision.next.proxy_attempt_index;

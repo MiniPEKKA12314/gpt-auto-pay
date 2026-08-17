@@ -216,6 +216,7 @@ CREATE TABLE IF NOT EXISTS orders (
   redeem_code_id INTEGER NOT NULL,
   plan_type TEXT NOT NULL,
   status TEXT NOT NULL,
+  lock_redeem_code_on_failure INTEGER NOT NULL DEFAULT 0,
   user_ip TEXT DEFAULT '',
   user_agent TEXT DEFAULT '',
   public_message TEXT DEFAULT '',

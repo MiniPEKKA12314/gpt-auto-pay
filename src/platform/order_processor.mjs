@@ -415,10 +415,15 @@ export class PlatformPaymentAttemptAdapter {
             meta: { error: message },
           });
           if (directResult?.status === "success" || directResult?.ok === true) {
-            directResult = failedResult("Subscription may have succeeded, but VCC remote card freeze failed: " + message, "CARD_FREEZE_FAILED", {
-              phase: "direct_card",
-              previous: directResult,
-          });
+            // Payment success is terminal. A post-payment card operation must never reclassify it as a failed order.
+            directResult = {
+              ...directResult,
+              post_payment_card_lifecycle: {
+                action: lifecycleAfterAction,
+                ok: false,
+                error: message,
+              },
+            };
           }
         }
       }

@@ -63,6 +63,7 @@ function ensurePlatformMigrations(db) {
   ensureColumn(db, "plan_configs", "kimoox_budget_id", "TEXT DEFAULT ''");
   ensureColumn(db, "plan_configs", "kimoox_reclaim_balance", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn(db, "plan_configs", "kimoox_cancel_after_order", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "orders", "lock_redeem_code_on_failure", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "cards", "provider", "TEXT DEFAULT ''");
   ensureColumn(db, "cards", "provider_card_id", "TEXT DEFAULT ''");
   ensureColumn(db, "cards", "auto_unfreeze_before_use", "INTEGER NOT NULL DEFAULT 0");
@@ -1269,17 +1270,20 @@ export class PlatformStore {
       if (code.status !== RedeemStatus.UNUSED) {
         throw new PlatformStoreError("REDEEM_CODE_NOT_UNUSED", "兑换码不可用", { status: code.status });
       }
+      const plan = this.getPlanConfig(code.plan_type);
+      const lockRedeemCodeOnFailure = boolInt(plan.lock_redeem_code_on_failure);
       const orderNo = String(input.order_no ?? input.orderNo ?? `ord_${Math.floor(now * 1000)}`);
       const orderResult = this.db.prepare(`
         INSERT INTO orders(
           order_no, redeem_code_id, plan_type, status,
-          user_ip, user_agent, queued_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          lock_redeem_code_on_failure, user_ip, user_agent, queued_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         orderNo,
         code.id,
         code.plan_type,
         OrderStatus.QUEUED,
+        lockRedeemCodeOnFailure,
         String(input.user_ip ?? input.userIp ?? ""),
         String(input.user_agent ?? input.userAgent ?? ""),
         now,
@@ -1301,6 +1305,7 @@ export class PlatformStore {
 
   createManualOrder(input = {}, now = nowSeconds()) {
     const planType = normalizePlanType(input.plan_type ?? input.planType);
+    const plan = this.getPlanConfig(planType);
     const cardGroupId = Number(input.card_group_id ?? input.cardGroupId);
     const cardId = Number(input.card_id ?? input.cardId);
     const billingGroupId = Number(input.billing_group_id ?? input.billingGroupId);
@@ -1371,13 +1376,14 @@ export class PlatformStore {
       const orderResult = this.db.prepare(`
         INSERT INTO orders(
           order_no, redeem_code_id, plan_type, status,
-          user_ip, user_agent, public_message, queued_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          lock_redeem_code_on_failure, user_ip, user_agent, public_message, queued_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         orderNo,
         codeId,
         planType,
         OrderStatus.QUEUED,
+        boolInt(plan.lock_redeem_code_on_failure),
         String(input.user_ip ?? input.userIp ?? ""),
         String(input.user_agent ?? input.userAgent ?? ""),
         "管理员手充订单已排队",
@@ -1990,6 +1996,9 @@ export class PlatformStore {
   requeueOrder(orderId, now = nowSeconds()) {
     return runTransaction(this.db, () => {
       const order = this.getOrderById(orderId);
+      if (order.status === OrderStatus.SUCCEEDED) {
+        throw new PlatformStoreError("ORDER_ALREADY_SUCCEEDED", "Payment has already been confirmed; the order cannot be requeued");
+      }
       this.db.prepare(`
         UPDATE orders
            SET status = ?, queued_at = ?, updated_at = ?,
@@ -2018,6 +2027,10 @@ export class PlatformStore {
 
   resolveInterruptedOrder(orderId, action, now = nowSeconds()) {
     const normalizedAction = String(action ?? "").trim();
+    const current = this.getOrderById(orderId);
+    if (current.status === OrderStatus.SUCCEEDED) {
+      throw new PlatformStoreError("ORDER_ALREADY_SUCCEEDED", "Payment has already been confirmed; the order cannot be changed");
+    }
     if (normalizedAction === "return" || normalizedAction === "return_code") {
       return this.markOrderFailedAndReleaseCode(orderId, {
         public_message: "",
@@ -2054,6 +2067,10 @@ export class PlatformStore {
   }
 
   markOrderRunning(orderId, now = nowSeconds()) {
+    const order = this.getOrderById(orderId);
+    if (order.status === OrderStatus.SUCCEEDED) {
+      throw new PlatformStoreError("ORDER_ALREADY_SUCCEEDED", "Payment has already been confirmed; the order cannot be started again");
+    }
     this.db.prepare(`
       UPDATE orders
          SET status = ?, started_at = CASE WHEN started_at = 0 THEN ? ELSE started_at END,
@@ -2066,6 +2083,12 @@ export class PlatformStore {
   markOrderSucceeded(orderId, now = nowSeconds()) {
     return runTransaction(this.db, () => {
       const order = this.getOrderById(orderId);
+      if (order.status === OrderStatus.SUCCEEDED) {
+        return {
+          order,
+          redeemCode: this.getRedeemCodeById(order.redeem_code_id),
+        };
+      }
       this.db.prepare(`
         UPDATE orders
            SET status = ?, finished_at = CASE WHEN finished_at = 0 THEN ? ELSE finished_at END,
@@ -2087,7 +2110,15 @@ export class PlatformStore {
   markOrderFailedAndReleaseCode(orderId, fields = {}, now = nowSeconds()) {
     return runTransaction(this.db, () => {
       const order = this.getOrderById(orderId);
-      const lockCode = fields.lock_redeem_code_on_failure === true || fields.lock_redeem_code_on_failure === 1 || fields.lock_redeem_code_on_failure === "1";
+      if (order.status === OrderStatus.SUCCEEDED) {
+        throw new PlatformStoreError("ORDER_ALREADY_SUCCEEDED", "Payment has already been confirmed; the order cannot be changed to failed");
+      }
+      const configuredPlan = this.getPlanConfig(order.plan_type);
+      const hasExplicitLockSetting = Object.hasOwn(fields, "lock_redeem_code_on_failure") || Object.hasOwn(fields, "lockRedeemCodeOnFailure");
+      const lockSetting = hasExplicitLockSetting
+        ? (fields.lock_redeem_code_on_failure ?? fields.lockRedeemCodeOnFailure)
+        : configuredPlan.lock_redeem_code_on_failure;
+      const lockCode = boolInt(order.lock_redeem_code_on_failure) === 1 || boolInt(lockSetting) === 1;
       const codeStatus = lockCode ? RedeemStatus.UNAVAILABLE : RedeemStatus.UNUSED;
       const unavailableReason = String(fields.unavailable_reason ?? fields.unavailableReason ?? "充值失败后按套餐设置锁定兑换码");
       this.db.prepare(`
