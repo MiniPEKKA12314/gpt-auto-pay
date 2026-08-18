@@ -28,3 +28,16 @@ test("admin overview refresh tolerates temporarily missing responsive nodes", ()
   assert.match(html, /setInnerHtml\("queuedOrdersBody"/);
   assert.doesNotMatch(html, /\$\("metricErrorOrders"\)\.textContent\s*=/);
 });
+
+test("admin queue concurrency input has a visible label", () => {
+  const html = renderAdminUi();
+
+  assert.match(html, /<label style="margin:0">并发数 <input id="queueConcurrency"[^>]*aria-label="并发数"/);
+});
+
+test("admin realtime refresh does not reload an opened order detail", () => {
+  const html = renderAdminUi();
+
+  assert.doesNotMatch(html, /tab === "overview"[^\n]*showOrderDetails\(state\.openOrderDetailId/);
+  assert.doesNotMatch(html, /tab === "orders"[^\n]*showOrderDetails\(state\.openOrderDetailId/);
+});

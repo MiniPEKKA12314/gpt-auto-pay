@@ -610,7 +610,7 @@ export function renderAdminUi(options = {}) {
             <div class="row">
               <span id="queueState" class="pill">unknown</span>
               <span id="queueWorkerState" class="pill">自动处理器未知</span>
-              <input id="queueConcurrency" type="number" min="1" max="1000" style="width:120px">
+              <label style="margin:0">并发数 <input id="queueConcurrency" type="number" min="1" max="1000" aria-label="并发数" style="width:120px"></label>
               <button id="saveQueueBtn">保存</button>
               <button id="pauseQueueBtn">暂停</button>
               <button id="resumeQueueBtn" class="primary">恢复</button>
@@ -1751,10 +1751,8 @@ export function renderAdminUi(options = {}) {
         if (options.force !== true && (isEditingField() || hasActiveTextSelection())) return;
 
         renderOverview();
-        if (tab === "overview" && state.openOrderDetailId && !selectionInsideOrderDetail()) await showOrderDetails(state.openOrderDetailId, { quiet: true });
         if (tab === "orders") {
           renderOrders();
-          if (state.openOrderDetailId && !selectionInsideOrderDetail()) await showOrderDetails(state.openOrderDetailId, { quiet: true });
         } else if (tab === "redeem") {
           renderRedeem();
         } else if (tab === "manual") {
