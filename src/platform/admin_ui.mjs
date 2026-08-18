@@ -213,6 +213,32 @@ export function renderAdminUi(options = {}) {
       font-size: 26px;
       line-height: 1.1;
     }
+    .section-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .section-heading h2 { margin: 0; }
+    .metric .section-heading { margin-bottom: 0; }
+    .metric .section-heading button {
+      min-height: 28px;
+      padding: 4px 9px;
+      font-size: 12px;
+    }
+    .overview-error-card {
+      min-height: 92px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .overview-error-card .error-count {
+      color: var(--bad);
+      font-size: 26px;
+      font-weight: 900;
+      line-height: 1.1;
+    }
     button.metric {
       width: 100%;
       color: var(--text);
@@ -413,6 +439,11 @@ export function renderAdminUi(options = {}) {
       user-select: text;
       -webkit-user-select: text;
     }
+    pre.error-log-output {
+      color: #ff6b6b;
+      border-color: #7f1d1d;
+      background: #160d12;
+    }
     .log-toolbar {
       display: flex;
       gap: 8px;
@@ -569,7 +600,10 @@ export function renderAdminUi(options = {}) {
             <div class="metric"><span>历史成功订单</span><b id="metricHistorySuccess">0</b></div>
             <div class="metric"><span>今日成功订单</span><b id="metricTodaySuccess">0</b></div>
             <div class="metric"><span>今日失败订单</span><b id="metricTodayFailed">0</b></div>
-            <button id="errorCenterBtn" type="button" class="metric"><span>近 24 小时报错订单</span><b id="metricErrorOrders">0</b></button>
+            <div class="metric overview-error-card">
+              <div class="section-heading"><span>近 24 小时报错订单</span><button id="errorCenterBtn" type="button">详情</button></div>
+              <b id="metricErrorOrders" class="error-count">0</b>
+            </div>
           </div>
           <section>
             <h2>队列控制</h2>
@@ -1042,7 +1076,7 @@ export function renderAdminUi(options = {}) {
       </div>
       <div id="errorLogsPane" hidden style="margin-top:14px">
         <div class="row"><button id="backErrorOrdersBtn" type="button">返回订单列表</button><h2 id="errorOrderTitle" style="margin:0"></h2></div>
-        <pre id="errorOrderLogsOutput" style="max-height:55vh"></pre>
+        <pre id="errorOrderLogsOutput" class="error-log-output" style="max-height:55vh"></pre>
       </div>
     </div>
   </dialog>
@@ -1164,6 +1198,18 @@ export function renderAdminUi(options = {}) {
       if (!node) return;
       node.innerHTML = html || "";
       scrollToBottom(node);
+    }
+
+    function setTextContent(id, value) {
+      const node = $(id);
+      if (node) node.textContent = value == null ? "" : String(value);
+      return node;
+    }
+
+    function setInnerHtml(id, value) {
+      const node = $(id);
+      if (node) node.innerHTML = value || "";
+      return node;
     }
 
     async function api(path, options) {
@@ -1503,9 +1549,8 @@ export function renderAdminUi(options = {}) {
     }
 
     function setAutoRefreshState(text, tone) {
-      if (!$("autoRefreshState")) return;
-      $("autoRefreshState").textContent = text;
-      $("autoRefreshState").className = "pill " + (tone || "ok");
+      const node = setTextContent("autoRefreshState", text);
+      if (node) node.className = "pill " + (tone || "ok");
     }
 
     function isEditingField() {
@@ -1968,32 +2013,34 @@ export function renderAdminUi(options = {}) {
     function renderOverview() {
       const dashboard = state.dashboard || {};
       const queue = dashboard.queue || state.queue || {};
-      $("metricQueued").textContent = queue.queued || 0;
-      $("metricRunning").textContent = queue.running || 0;
-      $("metricUnused").textContent = (dashboard.redeem_codes && dashboard.redeem_codes.unused) || 0;
+      setTextContent("metricQueued", queue.queued || 0);
+      setTextContent("metricRunning", queue.running || 0);
+      setTextContent("metricUnused", (dashboard.redeem_codes && dashboard.redeem_codes.unused) || 0);
       const stats = dashboard.order_stats || {};
-      $("metricHistorySuccess").textContent = stats.history_success || 0;
-      $("metricTodaySuccess").textContent = stats.today_success || 0;
-      $("metricTodayFailed").textContent = stats.today_failed || 0;
-      $("metricErrorOrders").textContent = (dashboard.error_stats && dashboard.error_stats.order_count) || 0;
-      $("queueState").textContent = queueStatusLabel(queue.status);
-      $("queueState").className = "pill " + (queue.status === "running" ? "ok" : "warn");
-      $("queueWorkerState").textContent = workerStatusLabel(queue.worker);
-      $("queueWorkerState").className = "pill " + (queue.worker && queue.worker.enabled && queue.worker.started ? "ok" : "warn");
-      if (document.activeElement !== $("queueConcurrency")) $("queueConcurrency").value = queue.concurrency || 1;
-      if ($("autoPauseFailureCount") && document.activeElement !== $("autoPauseFailureCount")) $("autoPauseFailureCount").value = queue.auto_pause_failure_count ?? 0;
-      $("queueOutput").textContent = queueSummaryText(queue);
+      setTextContent("metricHistorySuccess", stats.history_success || 0);
+      setTextContent("metricTodaySuccess", stats.today_success || 0);
+      setTextContent("metricTodayFailed", stats.today_failed || 0);
+      setTextContent("metricErrorOrders", (dashboard.error_stats && dashboard.error_stats.order_count) || 0);
+      const queueStateNode = setTextContent("queueState", queueStatusLabel(queue.status));
+      if (queueStateNode) queueStateNode.className = "pill " + (queue.status === "running" ? "ok" : "warn");
+      const workerStateNode = setTextContent("queueWorkerState", workerStatusLabel(queue.worker));
+      if (workerStateNode) workerStateNode.className = "pill " + (queue.worker && queue.worker.enabled && queue.worker.started ? "ok" : "warn");
+      const concurrencyNode = $("queueConcurrency");
+      if (concurrencyNode && document.activeElement !== concurrencyNode) concurrencyNode.value = queue.concurrency || 1;
+      const autoPauseNode = $("autoPauseFailureCount");
+      if (autoPauseNode && document.activeElement !== autoPauseNode) autoPauseNode.value = queue.auto_pause_failure_count ?? 0;
+      setTextContent("queueOutput", queueSummaryText(queue));
       setScrollableHtml("liveRunLogsOutput", formatDashboardRunLogs(dashboard.recent_logs || []));
       const queuedOrders = Array.isArray(dashboard.queued_orders)
         ? dashboard.queued_orders
         : state.orders.filter(function(order) { return order.status === "queued"; }).slice(0, 20);
-      $("queuedOrdersBody").innerHTML = queuedOrders.length ? queuedOrders.map(function(order) {
+      setInnerHtml("queuedOrdersBody", queuedOrders.length ? queuedOrders.map(function(order) {
         return "<tr><td class='mono'>" + h(order.order_no) + "</td><td class='mono'>" + h(order.redeem_code || "") + "</td><td>" + h(order.plan_type) + "</td><td>" + h(timeText(order.queued_at || order.created_at)) + "</td><td>" + h(durationText(order.queued_at || order.created_at)) + "</td><td>" + statusPill(order.status) + "</td></tr>";
-      }).join("") : "<tr><td colspan='6'>暂无排队任务</td></tr>";
+      }).join("") : "<tr><td colspan='6'>暂无排队任务</td></tr>");
       const recentOrders = Array.isArray(dashboard.recent_orders) ? dashboard.recent_orders : state.orders.slice(0, 8);
-      $("recentOrdersBody").innerHTML = recentOrders.map(function(order) {
+      setInnerHtml("recentOrdersBody", recentOrders.map(function(order) {
         return "<tr><td class='mono'>" + h(order.order_no) + "</td><td class='mono'>" + h(order.redeem_code || "") + "</td><td>" + h(order.plan_type) + "</td><td>" + statusPill(order.status) + "</td><td>" + h(timeText(order.created_at)) + "</td><td>" + h(order.admin_error || "") + "</td><td class='row'><button data-order-detail='" + order.id + "'>详情</button><button class='danger' data-order-delete='" + order.id + "' data-order-no='" + h(order.order_no) + "'>删除</button></td></tr>";
-      }).join("");
+      }).join(""));
     }
 
     function renderOrders() {
