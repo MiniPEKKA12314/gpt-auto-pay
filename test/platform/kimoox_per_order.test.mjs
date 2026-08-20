@@ -4,7 +4,7 @@ import test from "node:test";
 import { openPlatformDb, PlatformStore } from "../../src/platform/db.mjs";
 import { runPlatformOrderWithRetry } from "../../src/platform/runner_adapter.mjs";
 import { createPlatformPaymentAdapterFactory } from "../../src/platform/order_processor.mjs";
-import { prepareKimooxPerOrderCard, queryVccStoredCardBalance } from "../../src/platform/card_lifecycle.mjs";
+import { cleanupKimooxPerOrderCard, prepareKimooxPerOrderCard, queryVccStoredCardBalance } from "../../src/platform/card_lifecycle.mjs";
 
 test("Kimoox per-order mode opens a new card, runs payment, then withdraws and cancels", async () => {
   const db = openPlatformDb(":memory:");
@@ -71,6 +71,7 @@ test("Kimoox per-order mode opens a new card, runs payment, then withdraws and c
       },
       async cashOutCard(input) {
         actions.push("cashout:" + input.amount);
+        assert.ok(input.requestNo.length <= 30);
         if (input.amount === "12.33") {
           throw new Error("Kimoox API HTTP 500: 转出金额不能大于可转出余额，最多可转出 12.32 USD");
         }
@@ -122,6 +123,51 @@ test("Kimoox per-order mode opens a new card, runs payment, then withdraws and c
       "cancel:kc-1",
       "balance:kc-1",
     ]);
+  } finally {
+    store.close();
+  }
+});
+
+test("Kimoox cleanup confirms a completed withdrawal when the provider responds with a transaction-id error", async () => {
+  const store = new PlatformStore(openPlatformDb(":memory:"), { secretKey: "local-development-secret" });
+  try {
+    const cardGroupId = store.createCardGroup({ name: "cleanup recovery" }, 1);
+    const cardId = store.createCard({
+      card_group_id: cardGroupId,
+      number: "4242424242424242",
+      exp_month: "12",
+      exp_year: "2030",
+      cvc: "123",
+      provider: "kimoox",
+      provider_card_id: "kc-cleanup",
+    }, 2);
+    const card = store.getCardById(cardId, { includeSecret: true });
+    let withdrawn = false;
+    let cancelled = false;
+    const result = await cleanupKimooxPerOrderCard({
+      store,
+      order: { id: 1, order_no: "ord_cleanup" },
+      plan: { card_source: "kimoox", remote_failure_withdraw: true, remote_failure_final_action: "cancel" },
+      card,
+      success: false,
+      now: () => 10,
+      cardProviderFactory: () => ({
+        async listCards() {
+          return [{ provider_card_id: "kc-cleanup", card_balance: withdrawn ? "0.01" : "5.00", state: cancelled ? "CANCELLED" : "ACTIVE" }];
+        },
+        async cashOutCard() {
+          withdrawn = true;
+          throw new Error("Kimoox API HTTP 500: Data too long for column 'txn_id'");
+        },
+        async cancelCard() {
+          cancelled = true;
+          return { status: "SUBMITTED" };
+        },
+      }),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.cash_out_confirm.confirmed, true);
+    assert.equal(result.cancel_confirm.confirmed, true);
   } finally {
     store.close();
   }

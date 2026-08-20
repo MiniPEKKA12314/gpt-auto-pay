@@ -193,6 +193,37 @@ test("runner adapter releases redeem code on failed execution", async () => {
   }
 });
 
+test("runner adapter terminalizes a Kimoox cleanup failure as failed instead of holding the order", async () => {
+  const { store, orderId } = createReadyOrder();
+  try {
+    const plan = store.getPlanConfig("plus");
+    store.upsertPlanConfig({
+      ...plan,
+      card_source: "kimoox",
+      kimoox_issue_mode: "per_order",
+      kimoox_card_bin_id: "bin-1",
+      vcc_target_balance_usd: "5.00",
+      remote_failure_withdraw: true,
+      remote_failure_final_action: "cancel",
+    }, 201);
+    const adapter = createFunctionRunnerAdapter(async () => ({ status: "failed", message: "payment page unavailable" }));
+    const result = await runPlatformOrderWithRetry(store, orderId, async () => adapter, {
+      now: () => 202,
+      cardProviderFactory: () => ({
+        async openCard(input) { return { requestNo: input.requestNo, taskId: "task-1", batchNo: "batch-1", applyStatus: "SUBMITTED" }; },
+        async getOpenCardDetail() { return { taskId: "task-1", batchNo: "batch-1", applyStatus: "SUCCESS", successCount: 1 }; },
+        async listCardsWithPrivateInfo() { return [{ provider_card_id: "kc-fail", number: "4242424242424242", exp_month: "12", exp_year: "2030", cvc: "123" }]; },
+        async listCards() { throw new Error("Kimoox API HTTP 500: cleanup query unavailable"); },
+      }),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.order.status, "failed");
+    assert.equal(result.redeemCode.status, "unused");
+  } finally {
+    store.close();
+  }
+});
+
 test("runner adapter fails cleanly when no card is available", async () => {
   const db = openPlatformDb(":memory:");
   const store = new PlatformStore(db);

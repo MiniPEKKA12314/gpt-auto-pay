@@ -171,6 +171,19 @@ export function renderPublicUi(options = {}) {
       font-size: 13px;
       font-weight: 800;
     }
+    .field-label-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .field-label-row label { margin-bottom: 7px; }
+    .session-link {
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
     input, textarea {
       width: 100%;
       border: 1px solid var(--line);
@@ -317,7 +330,10 @@ export function renderPublicUi(options = {}) {
         <form id="redeemForm">
           <label for="codeInput">CDK 卡密</label>
           <input id="codeInput" name="code" autocomplete="off" placeholder="请输入 CDK">
-          <label for="credentialInput">充值授权凭证</label>
+          <div class="field-label-row">
+            <label for="credentialInput">充值授权凭证</label>
+            <a class="session-link" href="https://chatgpt.com/api/auth/session" target="_blank" rel="noopener noreferrer">打开 session 页面</a>
+          </div>
           <textarea id="credentialInput" name="credential" placeholder="粘贴从 chatgpt.com/api/auth/session 复制的完整 JSON"></textarea>
           <div id="credentialHint" class="field-hint"></div>
           <div class="actions">

@@ -177,10 +177,13 @@ async function queryRemoteBalanceWithProvider(provider, card) {
 }
 
 function operationRequestNo(prefix = "KO", order = {}, card = {}) {
-  const raw = `${prefix}_${order.order_no || order.id || "order"}_${card.provider_card_id || card.id || Date.now()}_${Date.now()}`;
-  let text = raw.replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 64);
-  if (!/^[A-Za-z]/.test(text)) text = `${prefix}_${text}`.slice(0, 64);
-  return text.length >= 8 ? text : `${prefix}_${Date.now()}`.slice(0, 64);
+  const identity = `${order.order_no || order.id || "order"}:${card.provider_card_id || card.id || "card"}`;
+  let checksum = 5381;
+  for (const char of identity) checksum = ((checksum * 33) ^ char.charCodeAt(0)) >>> 0;
+  const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+  // Kimoox persists provider-side transaction ids derived from this value.
+  // Keep it compact to avoid their transaction-id column limit.
+  return `${String(prefix || "KO").replace(/[^A-Za-z0-9]/g, "").slice(0, 4) || "KO"}${checksum.toString(36)}${nonce}`.slice(0, 30);
 }
 
 function extractCashOutLimitCents(error) {
@@ -210,6 +213,7 @@ async function submitCashOutWithLimitRetry(provider, target, balanceCents, order
       return { cashOut, amount, requestNo, attempts: attempt + 1 };
     } catch (error) {
       lastError = error;
+      error.kimooxCashOut = { amount, amount_cents: amountCents, requestNo, attempt: attempt + 1 };
       const limitCents = extractCashOutLimitCents(error);
       if (attempt === 0 && Number.isInteger(limitCents) && limitCents > 0 && limitCents < amountCents) {
         amountCents = limitCents;
@@ -720,11 +724,11 @@ export async function prepareKimooxPerOrderCard(context = {}) {
   });
   if (context.retryRuntime && typeof context.retryRuntime === "object") {
     context.retryRuntime.kimooxRequestNo = requestNo;
-    context.retryRuntime.kimooxOpenSubmitted = true;
+    context.retryRuntime.kimooxOpenSubmitted = false;
   }
   if (context.attemptId && typeof store.updateOrderAttemptProviderOperation === "function") {
     store.updateOrderAttemptProviderOperation(context.attemptId, {
-      provider_open_submitted: 1,
+      provider_open_submitted: 0,
       provider_request_no: requestNo,
     });
   }
@@ -829,13 +833,35 @@ export async function cleanupKimooxPerOrderCard(context = {}) {
       const balance = await queryRemoteBalanceWithProvider(provider, card);
       result.balance = balance;
       if (balance.balance_cents > 0) {
-        const cashOut = await submitCashOutWithLimitRetry(provider, target, balance.balance_cents, context.order ?? {}, card, emit, source);
-        if (!cashOut.skipped) {
-          result.cash_out = cashOut.cashOut;
-          result.cash_out_amount = cashOut.amount;
-          result.cash_out_attempts = cashOut.attempts;
-          const expectedRemainingCents = Math.max(0, balance.balance_cents - Number(moneyToCents(cashOut.amount) || 0));
-          result.cash_out_confirm = await waitForKimooxBalanceAtMost(provider, card, expectedRemainingCents, emit, { timeoutMs, requestNo: cashOut.requestNo, amount: cashOut.amount });
+        try {
+          const cashOut = await submitCashOutWithLimitRetry(provider, target, balance.balance_cents, context.order ?? {}, card, emit, source);
+          if (!cashOut.skipped) {
+            result.cash_out = cashOut.cashOut;
+            result.cash_out_amount = cashOut.amount;
+            result.cash_out_attempts = cashOut.attempts;
+            const expectedRemainingCents = Math.max(0, balance.balance_cents - Number(moneyToCents(cashOut.amount) || 0));
+            result.cash_out_confirm = await waitForKimooxBalanceAtMost(provider, card, expectedRemainingCents, emit, { timeoutMs, requestNo: cashOut.requestNo, amount: cashOut.amount });
+          }
+        } catch (error) {
+          const attempted = error.kimooxCashOut ?? {};
+          const attemptedCents = Number(attempted.amount_cents ?? moneyToCents(attempted.amount) ?? 0);
+          if (source !== "kimoox" || attemptedCents <= 0) throw error;
+          const expectedRemainingCents = Math.max(0, balance.balance_cents - attemptedCents);
+          emit({
+            level: "warn",
+            stage: "kimoox_cleanup",
+            message: `Kimoox 转出接口返回异常，继续核对卡余额确认请求是否实际生效: ${error.message || error}`,
+            meta: { requestNo: attempted.requestNo, amount: attempted.amount, expected_remaining_usd: centsToUsd(expectedRemainingCents) },
+          });
+          result.cash_out = { submitted_with_api_error: true, error: error.message || String(error) };
+          result.cash_out_amount = attempted.amount;
+          result.cash_out_attempts = attempted.attempt;
+          result.cash_out_confirm = await waitForKimooxBalanceAtMost(provider, card, expectedRemainingCents, emit, {
+            timeoutMs,
+            requestNo: attempted.requestNo,
+            amount: attempted.amount,
+          });
+          result.cash_out_api_error = error.message || String(error);
         }
       } else {
         emit({ level: "success", stage: "kimoox_cleanup", message: `${cardProviderLabel(source)} 卡余额为 0，余额转出确认完成`, meta: balance });

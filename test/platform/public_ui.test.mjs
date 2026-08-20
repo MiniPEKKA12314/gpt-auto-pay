@@ -69,6 +69,14 @@ test("public UI extracts tokens from ChatGPT auth session JSON", () => {
   assert.equal(parsed.sessionToken, "session-token-secret");
 });
 
+test("public UI provides a direct link to the ChatGPT session page", () => {
+  const html = renderPublicUi();
+
+  assert.match(html, /href="https:\/\/chatgpt\.com\/api\/auth\/session"/);
+  assert.match(html, /target="_blank"/);
+  assert.match(html, /打开 session 页面/);
+});
+
 test("public UI repairs a session JSON missing the last brace", () => {
   const sandbox = loadPublicScript();
   const input = JSON.stringify({ accessToken: jwtWithPlan("free"), sessionToken: "session-token-secret" }).slice(0, -1);
